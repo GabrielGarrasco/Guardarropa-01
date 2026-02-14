@@ -11,7 +11,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v10.1", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v10.2", layout="centered", page_icon="🧥")
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
 def get_google_sheet_client():
@@ -193,7 +193,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v10.1 - Full Cloud")
+st.sidebar.caption("v10.2 - Visor Activo")
 
 # API KEY AUTOMÁTICA
 if "openweathermap" in st.secrets:
@@ -223,16 +223,20 @@ if updated:
 df = st.session_state['inventory']
 weather = get_weather(api_key, user_city)
 
-# --- VISOR OUTFIT ACTUAL (RECUPERADO) ---
+# --- VISOR OUTFIT ACTUAL (MODIFICADO PARA QUE SIEMPRE SE VEA) ---
 with st.sidebar:
     st.divider()
-    try:
-        fb = load_feedback_gsheet()
-        if not fb.empty:
-            accepted = fb[fb['Action'] == 'Accepted']
-            if not accepted.empty:
-                last = accepted.iloc[-1]
-                with st.expander("🕴️ Puesto Ahora", expanded=True):
+    # Ahora usamos un expander que siempre se crea
+    with st.expander("🕴️ Puesto Ahora", expanded=True):
+        try:
+            fb = load_feedback_gsheet()
+            found_outfit = False
+            
+            if not fb.empty and 'Action' in fb.columns:
+                accepted = fb[fb['Action'] == 'Accepted']
+                if not accepted.empty:
+                    last = accepted.iloc[-1]
+                    found_outfit = True
                     st.caption(f"📅 {last['Date']}")
                     
                     def show_mini(code, label):
@@ -248,7 +252,12 @@ with st.sidebar:
                     with c2: show_mini(last['Bottom'], "Bot")
                     if last['Outer'] and last['Outer'] != 'N/A':
                         show_mini(last['Outer'], "Out")
-    except: pass
+            
+            if not found_outfit:
+                st.info("No hay registro aún. ¡Elegí un outfit y dale a Confirmar!")
+                
+        except Exception as e:
+            st.warning("Sin datos.")
 
 # --- TABS ---
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Viaje"])
