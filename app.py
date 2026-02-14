@@ -11,7 +11,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v10.2", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v10.3", layout="centered", page_icon="🧥")
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
 def get_google_sheet_client():
@@ -145,10 +145,18 @@ def recommend_outfit(df, weather, occasion, seed):
     t_min = weather.get('min', weather['temp']) + 3
     final = []
 
+    # --- LÓGICA MODIFICADA: Si es Formal (F), incluye Universidad (U) ---
+    target_occasions = [occasion]
+    if occasion == 'F':
+        target_occasions = ['F', 'U']
+    # --------------------------------------------------------------------
+
     def get_best(cats, ess=True):
         curr_s = get_current_season()
-        pool = clean[(clean['Category'].isin(cats)) & (clean['Occasion'] == occasion) & ((clean['Season'] == curr_s) | (clean['Season'] == 'T'))]
-        if pool.empty: pool = clean[(clean['Category'].isin(cats)) & (clean['Occasion'] == occasion)]
+        # Filtro actualizado para usar target_occasions con .isin()
+        pool = clean[(clean['Category'].isin(cats)) & (clean['Occasion'].isin(target_occasions)) & ((clean['Season'] == curr_s) | (clean['Season'] == 'T'))]
+        
+        if pool.empty: pool = clean[(clean['Category'].isin(cats)) & (clean['Occasion'].isin(target_occasions))]
         if pool.empty and ess: pool = clean[clean['Category'].isin(cats)]
         if pool.empty: return None
         
@@ -193,7 +201,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v10.2 - Visor Activo")
+st.sidebar.caption("v10.3 - Formal + Uni")
 
 # API KEY AUTOMÁTICA
 if "openweathermap" in st.secrets:
@@ -223,21 +231,31 @@ if updated:
 df = st.session_state['inventory']
 weather = get_weather(api_key, user_city)
 
-# --- VISOR OUTFIT ACTUAL (MODIFICADO PARA QUE SIEMPRE SE VEA) ---
+# --- VISOR OUTFIT (LÓGICA ACTUALIZADA PARA HOY) ---
 with st.sidebar:
     st.divider()
-    # Ahora usamos un expander que siempre se crea
-    with st.expander("🕴️ Puesto Ahora", expanded=True):
+    with st.expander("🕴️ Estado del Outfit", expanded=True):
         try:
             fb = load_feedback_gsheet()
             found_outfit = False
+            today_str = get_mendoza_time().strftime("%Y-%m-%d")
             
             if not fb.empty and 'Action' in fb.columns:
                 accepted = fb[fb['Action'] == 'Accepted']
                 if not accepted.empty:
                     last = accepted.iloc[-1]
+                    last_date_str = str(last['Date']) # Esperado formato YYYY-MM-DD HH:MM
+                    
+                    # Chequeo si la fecha coincide con HOY
+                    is_today = today_str in last_date_str
+                    
+                    if is_today:
+                        st.success("✅ Look de Hoy (Activo)")
+                    else:
+                        st.warning(f"⚠️ Sin registrar hoy")
+                        st.caption(f"Último: {last_date_str}")
+
                     found_outfit = True
-                    st.caption(f"📅 {last['Date']}")
                     
                     def show_mini(code, label):
                         if code and code != 'N/A' and code != 'nan':
@@ -254,7 +272,7 @@ with st.sidebar:
                         show_mini(last['Outer'], "Out")
             
             if not found_outfit:
-                st.info("No hay registro aún. ¡Elegí un outfit y dale a Confirmar!")
+                st.info("No hay historial. ¡Elegí un outfit!")
                 
         except Exception as e:
             st.warning("Sin datos.")
