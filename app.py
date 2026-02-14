@@ -277,3 +277,81 @@ with tab1:
                         st.session_state['confirm_mode'] = None 
                         st.rerun()
             elif manual_code:
+                st.error("Código no encontrado.")
+
+    else:
+        st.warning("No hay ropa limpia para este clima.")
+
+# --- TAB 2: LAVADERO ---
+with tab2:
+    st.subheader("🧺 Gestión de Lavado")
+    
+    c_lav1, c_lav2 = st.columns([1, 3])
+    with c_lav1:
+        to_wash_code = st.text_input("Código a Lavar (Manual)")
+    with c_lav2:
+        if st.button("Meter al Lavarropas"):
+            if to_wash_code in df['Code'].values:
+                df.loc[df['Code'] == to_wash_code, 'Status'] = 'Lavando'
+                df.loc[df['Code'] == to_wash_code, 'Uses'] = 0 
+                save_data(df)
+                st.success(f"{to_wash_code} ahora está LAVANDO.")
+            else:
+                st.error("Código no existe.")
+
+    st.divider()
+    
+    st.write("#### Estado de Prendas")
+    edited_laundry = st.data_editor(
+        df[['Code', 'Category', 'Status', 'Uses', 'LastWorn']], 
+        key="editor_lavadero",
+        column_config={
+            "Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True),
+            "Uses": st.column_config.NumberColumn("Usos Acumulados")
+        },
+        hide_index=True,
+        disabled=["Code", "Category"]
+    )
+    if st.button("Guardar Cambios Lavadero"):
+        df.update(edited_laundry)
+        st.session_state['inventory'] = df
+        save_data(df)
+        st.success("Inventario actualizado.")
+
+# --- TAB 3: INVENTARIO ---
+with tab3:
+    st.subheader("Inventario Completo")
+    edited_inventory = st.data_editor(df, num_rows="dynamic", hide_index=False)
+    if st.button("Guardar Inventario"):
+        st.session_state['inventory'] = edited_inventory
+        save_data(edited_inventory)
+        st.success("Guardado.")
+
+# --- TAB 4: CARGA ---
+with tab4:
+    st.subheader("Alta Prenda")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        c_temp = st.selectbox("Temporada", ["V", "W", "M"])
+        c_type_full = st.selectbox("Tipo", ["R - Remera", "CS - Camisa", "P - Pantalón", "C - Campera", "B - Buzo"])
+        type_code = {"R - Remera": "R", "CS - Camisa": "CS", "P - Pantalón": "P", "C - Campera": "C", "B - Buzo": "B"}[c_type_full]
+        category_name = c_type_full.split(" - ")[1]
+        if type_code == "P": c_attr = st.selectbox("Modelo", ["Je", "Sh", "DL", "DC", "Ve"])
+        elif type_code in ["C", "B"]: c_attr = f"0{st.selectbox('Abrigo', ['1', '2', '3', '4', '5'])}"
+        else: c_attr = st.selectbox("Manga", ["00", "01", "02"])[:2]
+    with col_b:
+        c_occ = st.selectbox("Ocasión", ["U", "D", "C", "F"])[0]
+        c_col = st.selectbox("Color", ["01-Blanco", "02-Negro", "03-Rojo", "04-Azul", "10-Denim"])[:2]
+        c_url = st.text_input("URL Foto")
+
+    prefix = f"{c_temp}{type_code}{c_attr}{c_occ}{c_col}"
+    count = len([c for c in df['Code'] if str(c).startswith(prefix)])
+    final_code = f"{prefix}{count + 1:02d}"
+    st.code(final_code)
+    
+    if st.button("Agregar Prenda"):
+        new_row = pd.DataFrame([{'Code': final_code, 'Category': category_name, 'Season': c_temp, 'Occasion': c_occ, 'ImageURL': c_url, 'Status': 'Limpio', 'LastWorn': datetime.now().strftime("%Y-%m-%d"), 'Uses': 0}])
+        updated_df = pd.concat([df, new_row], ignore_index=True)
+        st.session_state['inventory'] = updated_df
+        save_data(updated_df)
+        st.success("Agregado.")
