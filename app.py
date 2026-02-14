@@ -500,41 +500,27 @@ with tab5:
     except: st.info("Falta data de feedback.")
 
 with tab6:
-    st.header("✈️ Modo Viaje: Planificador Integral")
-
-    # --- FUNCIONES DE LIMPIEZA ---
-    def reset_trip():
-        st.session_state['travel_pack'] = None
-        st.session_state['travel_selections'] = {}
-        st.session_state['travel_end_date'] = None
-        st.toast("🗑️ Viaje finalizado. ¡Bienvenido a casa!")
-
-    # --- LÓGICA 2: AUTO-RESET POR TIEMPO ---
-    # Si existe una fecha de fin y ya pasó, reseteamos al cargar la pestaña
-    if st.session_state.get('travel_end_date'):
-        if datetime.now() > st.session_state['travel_end_date']:
-            reset_trip()
-            st.rerun()
-
-    # --- INPUTS ---
+    st.header("✈️ Modo Viaje: Planificador Visual")
+    
     col_dest, col_days = st.columns([2, 1])
     with col_dest:
         dest_city = st.text_input("📍 Destino", value="Buenos Aires")
     with col_days:
         num_days = st.number_input("📅 Días", min_value=1, max_value=30, value=3)
 
-    # --- BOTÓN GENERAR ---
-    if st.button("🎒 Generar Maleta", type="primary", use_container_width=True):
+    # --- Lógica de Generación de Valija ---
+    if st.button("🎒 Generar Propuesta de Valija", type="primary", use_container_width=True):
         packable = df[df['Status'] == 'Limpio']
         
         if packable.empty:
             st.error("¡No tenés ropa limpia para viajar!")
         else:
-            # Selección de prendas
+            # Cálculo simple de necesidades
             n_tops = num_days + 1
             n_bots = (num_days // 2) + 1
-            n_out = 2
+            n_out = 2  # Siempre es bueno llevar 1 o 2 abrigos extra
             
+            # Selección aleatoria (pero priorizando lo disponible)
             tops = packable[packable['Category'].isin(['Remera', 'Camisa'])]
             if len(tops) > n_tops: tops = tops.sample(n_tops)
             
@@ -544,75 +530,54 @@ with tab6:
             outs = packable[packable['Category'].isin(['Campera', 'Buzo'])]
             if len(outs) > n_out: outs = outs.sample(n_out)
             
-            # GUARDADO DE ESTADO
+            # Guardamos todo junto en el session state
             st.session_state['travel_pack'] = pd.concat([tops, bots, outs])
-            st.session_state['travel_selections'] = {}
-            # Seteamos fecha de fin: Ahora + Días del viaje
-            st.session_state['travel_end_date'] = datetime.now() + timedelta(days=num_days)
-            st.rerun()
+            # Reseteamos las selecciones de ida/vuelta anteriores
+            st.session_state['travel_selections'] = {} 
 
-    # --- VISUALIZACIÓN DEL VIAJE ACTIVO ---
+    # --- Visualización de la Valija ---
     if st.session_state.get('travel_pack') is not None:
         pack = st.session_state['travel_pack']
-        
-        # Mostrar fecha de regreso estimada
-        end_date_str = st.session_state['travel_end_date'].strftime("%d/%m")
-        st.caption(f"📅 Viaje activo hasta el {end_date_str}")
-        
         st.divider()
-        st.subheader(f"🧳 Tu Selección ({len(pack)} prendas)")
+        st.subheader(f"🧳 Contenido de la Valija ({len(pack)} prendas)")
         
-        # GRILLA DE PRENDAS
+        # Iteramos sobre las prendas creando una grilla de 3 columnas
         cols = st.columns(3)
         for i, (index, row) in enumerate(pack.iterrows()):
-            with cols[i % 3]:
+            with cols[i % 3]:  # Distribuye en columnas 0, 1, 2
                 with st.container(border=True):
+                    # 1. Imagen
                     img = cargar_imagen_desde_url(row['ImageURL'])
-                    if img: st.image(img, use_container_width=True)
-                    else: st.image("https://via.placeholder.com/150?text=Sin+Foto", use_container_width=True)
+                    if img:
+                        st.image(img, use_container_width=True)
+                    else:
+                        st.image("https://via.placeholder.com/150?text=Sin+Foto", use_container_width=True)
                     
+                    # 2. Datos
                     st.markdown(f"**{row['Category']}**")
-                    st.caption(f"`{row['Code']}`")
+                    st.caption(f"Code: `{row['Code']}`")
                     
+                    # 3. Selectores Ida / Vuelta
                     c_ida, c_vuelta = st.columns(2)
+                    
+                    # Usamos keys únicos combinando el string y el código
                     is_ida = c_ida.checkbox("🛫 Ida", key=f"ida_{row['Code']}")
                     is_vuelta = c_vuelta.checkbox("🛬 Vuelta", key=f"vuelta_{row['Code']}")
                     
+                    # Guardamos la selección en tiempo real (opcional para lógica futura)
                     if 'travel_selections' not in st.session_state: st.session_state['travel_selections'] = {}
                     st.session_state['travel_selections'][row['Code']] = {'ida': is_ida, 'vuelta': is_vuelta}
 
+        # --- Resumen del Outfit de Viaje ---
         st.divider()
+        st.markdown("### 🎫 Resumen de Viaje")
         
-        # --- SECCIÓN DE IMPRESCINDIBLES (CHECKLIST) ---
-        st.markdown("### 🧴 Básicos & Neceser")
-        st.caption("No te olvides de esto:")
+        sel = st.session_state.get('travel_selections', {})
+        ida_items = [code for code, vals in sel.items() if vals['ida']]
+        vuelta_items = [code for code, vals in sel.items() if vals['vuelta']]
         
-        with st.container(border=True):
-            ci1, ci2 = st.columns(2)
-            
-            # Columna 1: Higiene y Ropa Interior
-            with ci1:
-                st.markdown("**Higiene & Ropa**")
-                st.checkbox(f"🩲 Ropa Interior (x{num_days + 1})")
-                st.checkbox(f"🧦 Medias (x{num_days + 1})")
-                st.checkbox("🪥 Cepillo y Pasta")
-                st.checkbox("🚿 Desodorante / Perfume")
-                st.checkbox("🧴 Shampoo / Jabón")
-            
-            # Columna 2: Varios
-            with ci2:
-                st.markdown("**Varios**")
-                st.checkbox("📱 Cargador Celular")
-                st.checkbox("🎧 Auriculares")
-                st.checkbox("💳 DNI / Billetera")
-                st.checkbox("🔑 Llaves de Casa")
-                st.checkbox("💊 Medicamentos / Botiquín")
-
-        st.divider()
-
-        # --- LÓGICA 1: BOTÓN MANUAL FIN DE VIAJE ---
-        c_fin1, c_fin2 = st.columns([3, 1])
-        with c_fin2:
-            if st.button("🏁 Terminar Viaje", type="primary", use_container_width=True):
-                reset_trip()
-                st.rerun()
+        c_res1, c_res2 = st.columns(2)
+        with c_res1:
+            st.info(f"**Outfit de Ida:**\n" + (", ".join(ida_items) if ida_items else "Sin seleccionar"))
+        with c_res2:
+            st.success(f"**Outfit de Vuelta:**\n" + (", ".join(vuelta_items) if vuelta_items else "Sin seleccionar"))
