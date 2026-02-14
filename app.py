@@ -4,6 +4,8 @@ import requests
 import os
 import pytz
 from datetime import datetime, timedelta
+from PIL import Image       # <--- AGREGADO: Para manejar imagenes
+from io import BytesIO      # <--- AGREGADO: Para convertir datos
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="GDI: Mendoza Ops v9.3", layout="centered", page_icon="🧥")
@@ -26,6 +28,21 @@ def get_mendoza_time():
         return datetime.now(tz)
     except:
         return datetime.now()
+
+# <--- FUNCION NUEVA AGREGADA PARA ARREGLAR LAS FOTOS EN EL CELU --->
+@st.cache_data(show_spinner=False)
+def cargar_imagen_desde_url(url):
+    """Descarga la imagen en el servidor para que el celular no tenga que buscarla."""
+    if not url: return None
+    try:
+        # Intenta descargar la imagen
+        response = requests.get(url, timeout=3)
+        if response.status_code == 200:
+            return Image.open(BytesIO(response.content))
+    except:
+        return None
+    return None
+# <--- FIN FUNCION NUEVA --->
 
 def decodificar_sna(codigo):
     """Parsea el código SNA de forma robusta."""
@@ -218,8 +235,13 @@ with tab1:
                 uses = int(item['Uses'])
                 health = max(0.0, min(1.0, (limit - uses) / limit))
                 
-                if pd.notna(item['ImageURL']) and item['ImageURL']: st.image(item['ImageURL'], use_column_width=True)
-                else: st.empty()
+                # --- MODIFICADO: CARGA SEGURA DE IMAGEN ---
+                img_data = cargar_imagen_desde_url(item['ImageURL'])
+                if img_data:
+                    st.image(img_data, use_column_width=True)
+                else:
+                    st.empty() # Si falla la imagen, no muestra nada
+                # ------------------------------------------
                 
                 st.markdown(f"**{item['Category']}**")
                 st.caption(f"Code: `{item['Code']}`")
