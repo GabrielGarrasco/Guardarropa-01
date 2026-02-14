@@ -3,15 +3,17 @@ import pandas as pd
 import requests
 import os
 import pytz
+import json                     # <--- NUEVO: Para guardar la key
 from datetime import datetime, timedelta
-from PIL import Image       # <--- AGREGADO: Para manejar imagenes
-from io import BytesIO      # <--- AGREGADO: Para convertir datos
+from PIL import Image
+from io import BytesIO
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v9.3", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v9.4", layout="centered", page_icon="🧥")
 
 FILE_INV = 'inventory.csv'
 FILE_FEEDBACK = 'feedback.csv'
+FILE_SECRETS = 'secrets.json'   # <--- NUEVO: Archivo para guardar la key
 
 # --- LÍMITES DE USO (INGENIERÍA DE CICLO DE VIDA) ---
 LIMITES_USO = {
@@ -28,26 +30,43 @@ def get_mendoza_time():
         return datetime.now(tz)
     except:
         return datetime.now()
+
 def get_current_season():
     """Determina la temporada actual en Mendoza (Hemisferio Sur)."""
     month = get_mendoza_time().month
     if month in [12, 1, 2]: return 'V'  # Verano
     if month in [6, 7, 8]: return 'W'   # Invierno
-    return 'M'                         # Media (Otoño/Primavera)
-# <--- FUNCION NUEVA AGREGADA PARA ARREGLAR LAS FOTOS EN EL CELU --->
+    return 'M'                          # Media (Otoño/Primavera)
+
+# <--- FUNCIONES PARA MANEJO DE API KEY --->
+def load_api_key():
+    """Carga la API key del archivo local si existe."""
+    if os.path.exists(FILE_SECRETS):
+        try:
+            with open(FILE_SECRETS, 'r') as f:
+                data = json.load(f)
+                return data.get('api_key', '')
+        except:
+            return ''
+    return ''
+
+def save_api_key_to_file(key):
+    """Guarda la API key en un archivo local."""
+    with open(FILE_SECRETS, 'w') as f:
+        json.dump({'api_key': key}, f)
+# <--- FIN FUNCIONES API KEY --->
+
 @st.cache_data(show_spinner=False)
 def cargar_imagen_desde_url(url):
     """Descarga la imagen en el servidor para que el celular no tenga que buscarla."""
     if not url: return None
     try:
-        # Intenta descargar la imagen
         response = requests.get(url, timeout=3)
         if response.status_code == 200:
             return Image.open(BytesIO(response.content))
     except:
         return None
     return None
-# <--- FIN FUNCION NUEVA --->
 
 def decodificar_sna(codigo):
     """Parsea el código SNA de forma robusta."""
@@ -133,7 +152,7 @@ def check_laundry_timers(df):
                 updated = True
     return df, updated
 
-# --- LÓGICA DE RECOMENDACIÓN (V11 - CON FILTRO DE TEMPORADA 'T') ---
+# --- LÓGICA DE RECOMENDACIÓN ---
 def recommend_outfit(df, weather, occasion, seed):
     clean_df = df[df['Status'] == 'Limpio'].copy()
     if clean_df.empty: return pd.DataFrame(), 0
@@ -156,18 +175,18 @@ def recommend_outfit(df, weather, occasion, seed):
     def get_best_for_category(categories, is_essential=True):
         curr_season = get_current_season()
         
-        # 1. Pool Inicial: Filtrar por Categoría + Ocasión + Temporada (Actual o 'T')
+        # 1. Pool Inicial
         pool = clean_df[
             (clean_df['Category'].isin(categories)) & 
             (clean_df['Occasion'] == occasion) & 
             ((clean_df['Season'] == curr_season) | (clean_df['Season'] == 'T'))
         ]
         
-        # Fallback A: Si no hay nada, ignoramos la temporada pero mantenemos la ocasión
+        # Fallback A
         if pool.empty:
             pool = clean_df[(clean_df['Category'].isin(categories)) & (clean_df['Occasion'] == occasion)]
             
-        # Fallback B: Si sigue vacío y es esencial, ignoramos hasta la ocasión
+        # Fallback B
         if pool.empty and is_essential:
             pool = clean_df[clean_df['Category'].isin(categories)]
         
@@ -221,9 +240,26 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v9.3 - Stats Edition")
+st.sidebar.caption("v9.4 - AutoLogin Edition")
 st.sidebar.markdown("---")
-api_key = st.sidebar.text_input("🔑 API Key", type="password")
+
+# <--- LOGICA DE API KEY PERSISTENTE --->
+stored_api_key = load_api_key()
+
+if stored_api_key:
+    st.sidebar.success("🔑 API Key Cargada")
+    if st.sidebar.button("Cambiar/Borrar Key"):
+        save_api_key_to_file("") # Borra el archivo
+        st.rerun()
+    api_key = stored_api_key
+else:
+    api_key_input = st.sidebar.text_input("🔑 Ingresar API Key", type="password")
+    if api_key_input:
+        save_api_key_to_file(api_key_input)
+        st.rerun() # Recarga para que tome el estado de "Cargada"
+    api_key = api_key_input
+# <--- FIN LOGICA DE API KEY --->
+
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
 code_occ = user_occ[0]
@@ -243,7 +279,7 @@ if updated:
 df = st.session_state['inventory']
 weather = get_weather(api_key, user_city)
 
-# --- AQUI ESTÁ EL CAMBIO DE LOS TABS ---
+# --- TABS ---
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas"])
 
 with tab1:
@@ -274,13 +310,11 @@ with tab1:
                 uses = int(item['Uses'])
                 health = max(0.0, min(1.0, (limit - uses) / limit))
                 
-                # --- MODIFICADO: CARGA SEGURA DE IMAGEN ---
                 img_data = cargar_imagen_desde_url(item['ImageURL'])
                 if img_data:
                     st.image(img_data, use_column_width=True)
                 else:
-                    st.empty() # Si falla la imagen, no muestra nada
-                # ------------------------------------------
+                    st.empty()
                 
                 st.markdown(f"**{item['Category']}**")
                 st.caption(f"Code: `{item['Code']}`")
@@ -442,7 +476,6 @@ with tab4:
             new = pd.DataFrame([{'Code': code, 'Category': tipo_f.split(" - ")[1], 'Season': temp, 'Occasion': occ, 'ImageURL': url, 'Status': 'Limpio', 'LastWorn': get_mendoza_time().strftime("%Y-%m-%d"), 'Uses': 0}])
             st.session_state['inventory'] = pd.concat([df, new], ignore_index=True); save_data(st.session_state['inventory']); st.success(f"¡{code} agregado correctamente!")
 
-# --- TAB 5: ESTADÍSTICAS (NUEVO) ---
 with tab5:
     st.subheader("📊 Inteligencia de Guardarropas")
     
@@ -464,7 +497,6 @@ with tab5:
     with c_s2:
         st.markdown("##### 🕸️ Prendas 'Muertas' (+3 meses)")
         try:
-            # Convertimos LastWorn a datetime para calcular
             df['LastWorn_DT'] = pd.to_datetime(df['LastWorn'], errors='coerce')
             limit_date = datetime.now() - timedelta(days=90)
             dead_stock = df[(df['Status'] == 'Limpio') & (df['LastWorn_DT'] < limit_date)]
@@ -491,9 +523,7 @@ with tab5:
         try:
             fb = pd.read_csv(FILE_FEEDBACK)
             if not fb.empty:
-                # Promedio de las 3 métricas por registro
                 fb['Avg_Score'] = (fb['Rating_Abrigo'] + fb['Rating_Comodidad'] + fb['Rating_Seguridad']) / 3
-                # Agrupar por fecha (solo dia)
                 fb['Day'] = fb['Date'].str.slice(0, 10)
                 daily_trend = fb.groupby('Day')['Avg_Score'].mean()
                 st.line_chart(daily_trend)
