@@ -644,83 +644,99 @@ with tab5:
     else: st.info("Aún no hay historial de feedback.")
 with tab6:
     st.subheader("✈️ Despliegue Táctico (Armado de Valija)")
-    st.markdown("Generador de listas optimizado para reducción de peso y cobertura climática.")
     
+    # --- 1. LÓGICA DE AUTO-RESET (Caducidad del Viaje) ---
+    if 'travel_end_date' in st.session_state and st.session_state['travel_end_date']:
+        if datetime.now() > st.session_state['travel_end_date']:
+            # Si la fecha actual es mayor a la del fin del viaje, borramos todo
+            st.session_state['travel_pack'] = None
+            st.session_state['travel_end_date'] = None
+            st.toast("📅 El viaje terminó. Lista reiniciada automáticamente.")
+
+    # Inicializar estado si no existe
+    if 'travel_pack' not in st.session_state: st.session_state['travel_pack'] = None
+
+    # --- 2. INPUTS ---
     with st.container(border=True):
         c_dest, c_dias, c_motivo = st.columns(3)
         dest_city = c_dest.text_input("Destino", value="Buenos Aires")
         num_days = c_dias.number_input("Duración (Días)", min_value=1, value=3, step=1)
         trip_type = c_motivo.selectbox("Tipo de Misión", ["Ocio/Turismo", "Trabajo/Formal", "Aventura"])
     
+    # --- 3. GENERACIÓN (Botón Principal) ---
     if st.button("🎒 Generar Loadout", type="primary", use_container_width=True):
-        # 1. Inteligencia Climática
+        # A. Inteligencia Climática
         w_dest = get_weather(api_key, dest_city)
         st.info(f"🌤️ Clima en {dest_city}: {w_dest['desc'].capitalize()} | {w_dest['temp']}°C (Sensación {w_dest['feels_like']}°C)")
         
-        # 2. Algoritmo de Selección
-        # Regla: 1 Top por día + 1 Backup. 1 Bottom cada 2 días. 1 Abrigo si < 20°C.
+        # B. Algoritmo
         qty_tops = num_days + 1
         qty_bots = (num_days // 2) + 1
         qty_outer = 1 if w_dest['min'] < 20 else 0
         
-        # Filtrar inventario limpio
         packable = df[df['Status'] == 'Limpio'].copy()
         
-        # Filtrar por Ocasión (Si es trabajo, priorizamos F, si es Ocio, C o D)
         if trip_type == "Trabajo/Formal":
             packable = packable[packable['Occasion'].isin(['F', 'U'])]
         else:
             packable = packable[packable['Occasion'].isin(['C', 'D', 'U'])]
             
-        # Selección de Tops
+        # Selección Tops
         tops_pool = packable[packable['Category'].isin(['Remera', 'Camisa'])]
-        if len(tops_pool) >= qty_tops:
-            selected_tops = tops_pool.sample(qty_tops, random_state=st.session_state['seed'])
-        else:
-            selected_tops = tops_pool # Llevamos todo lo que haya si no alcanza
+        sel_tops = tops_pool.sample(min(len(tops_pool), qty_tops), random_state=st.session_state['seed']) if not tops_pool.empty else pd.DataFrame()
 
-        # Selección de Bottoms (Priorizar comodidad)
+        # Selección Bottoms
         bots_pool = packable[packable['Category'] == 'Pantalón']
-        if len(bots_pool) >= qty_bots:
-            selected_bots = bots_pool.sample(qty_bots, random_state=st.session_state['seed'])
-        else:
-            selected_bots = bots_pool
+        sel_bots = bots_pool.sample(min(len(bots_pool), qty_bots), random_state=st.session_state['seed']) if not bots_pool.empty else pd.DataFrame()
             
-        # Selección de Abrigo (El más pesado se lleva puesto, pero lo listamos)
+        # Selección Outer
         outer_pool = packable[packable['Category'].isin(['Campera', 'Buzo'])]
-        selected_outer = pd.DataFrame()
+        sel_outer = pd.DataFrame()
         if qty_outer > 0 and not outer_pool.empty:
-            # Elegimos el abrigo con nivel intermedio (3) para versatilidad, o el que haya
-            try:
-                # Intentar buscar algo nivel 3 o 4
-                ideal = outer_pool[outer_pool['Code'].str.contains('C03|C04|B03')] 
-                if not ideal.empty:
-                    selected_outer = ideal.sample(1)
-                else:
-                    selected_outer = outer_pool.sample(1)
-            except:
-                selected_outer = outer_pool.sample(1)
+            ideal = outer_pool[outer_pool['Code'].str.contains('C03|C04|B03', na=False)] 
+            sel_outer = ideal.sample(1) if not ideal.empty else outer_pool.sample(1)
 
-        # 3. Visualización de la Maleta
-        st.divider()
-        st.markdown("### 📋 Lista de Empaque")
+        # C. GUARDAR EN MEMORIA (ESTO ES NUEVO)
+        st.session_state['travel_pack'] = {
+            'tops': sel_tops, 
+            'bots': sel_bots, 
+            'outer': sel_outer,
+            'weather_info': w_dest
+        }
+        # Guardamos la fecha de expiración (Hoy + Días de viaje + 1 de margen)
+        st.session_state['travel_end_date'] = datetime.now() + timedelta(days=num_days + 1)
+        st.rerun()
+
+    # --- 4. VISUALIZACIÓN DE LA LISTA GUARDADA ---
+    if st.session_state['travel_pack'] is not None:
+        pack = st.session_state['travel_pack']
         
-        # Función para renderizar fila
+        st.divider()
+        c_tit, c_reset = st.columns([3, 1])
+        c_tit.markdown("### 📋 Lista de Empaque Activa")
+        
+        # BOTÓN DE RESET MANUAL
+        if c_reset.button("🗑️ Borrar Lista"):
+            st.session_state['travel_pack'] = None
+            st.session_state['travel_end_date'] = None
+            st.rerun()
+
+        st.caption(f"Clima previsto: {pack['weather_info']['desc']} ({pack['weather_info']['temp']}°C)")
+        
         def render_pack_row(items, label):
             if items.empty: return
             st.markdown(f"**{label} ({len(items)})**")
-            cols = st.columns(len(items))
+            # Usamos st.columns dinámico pero controlando que no explote si son muchos items
+            cols = st.columns(len(items)) if len(items) > 0 else []
             for idx, (_, item) in enumerate(items.iterrows()):
                 with cols[idx]:
                     img = cargar_imagen_desde_url(item['ImageURL'])
                     if img: st.image(img, use_column_width=True)
-                    st.caption(f"{item['Category']} - {item['Code']}")
-                    st.checkbox(f"Empacado", key=f"pack_{item['Code']}")
+                    st.caption(f"{item['Category']}")
+                    st.checkbox(f"Listo", key=f"pack_{item['Code']}")
 
-        render_pack_row(selected_tops, "👕 Tops (Rotación Diaria)")
-        render_pack_row(selected_bots, "👖 Bottoms (Reutilizables)")
-        if not selected_outer.empty:
-            render_pack_row(selected_outer, "🧥 Abrigo (Versátil)")
+        render_pack_row(pack['tops'], "👕 Tops")
+        render_pack_row(pack['bots'], "👖 Bottoms")
+        render_pack_row(pack['outer'], "🧥 Abrigo")
             
-        # Extra Items (Hardcoded logic for engineering completeness)
-        st.warning(f"⚠️ **No olvidar:** {num_days + 2} pares de medias, {num_days + 2} ropa interior, Kit de aseo, Cargadores.")
+        st.warning(f"⚠️ **No olvidar:** {num_days + 2} pares de medias/ropa interior, kit de aseo.")
