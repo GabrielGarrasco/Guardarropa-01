@@ -223,4 +223,81 @@ with tab1:
                         'User_Adj': temp_calc,
                         'Top': items_code.get('Top'),
                         'Bottom': items_code.get('Bottom'),
-                        'Outer
+                        'Outer': items_code.get('Outer'),
+                        'R_Abrigo': r_abrigo, 'R_Comodidad': r_comodidad, 'R_Seguridad': r_seguridad
+                    }
+                    save_feedback_entry(entry)
+                    st.balloons()
+                    st.info("Feedback guardado. ¡Nos vemos mañana!")
+
+    else:
+        st.error("No hay ropa limpia disponible para este clima.")
+
+# --- TAB 2: LAVADERO ---
+with tab2:
+    st.subheader("🧺 Gestión de Lavado")
+    c_l1, c_l2 = st.columns([1,3])
+    code_wash = c_l1.text_input("Código a Lavar")
+    if c_l2.button("Meter al Lavarropas"):
+        if code_wash in df['Code'].values:
+            df.loc[df['Code'] == code_wash, 'Status'] = 'Lavando'
+            df.loc[df['Code'] == code_wash, 'Uses'] = 0
+            save_data(df)
+            st.success(f"{code_wash} lavándose.")
+        else: st.error("No encontrado.")
+    
+    st.divider()
+    edited_laundry = st.data_editor(
+        df[['Code', 'Category', 'Status', 'Uses']], 
+        key="laundry_editor",
+        column_config={
+            "Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True),
+            "Uses": st.column_config.ProgressColumn("Desgaste/Uso", min_value=0, max_value=6, format="%d usos")
+        },
+        disabled=["Code", "Category"],
+        hide_index=True
+    )
+    if st.button("Guardar Cambios Lavadero"):
+        df.update(edited_laundry)
+        save_data(df)
+        st.success("Actualizado.")
+
+# --- TAB 3: INVENTARIO ---
+with tab3:
+    st.subheader("Inventario General")
+    edited_inv = st.data_editor(df, num_rows="dynamic", hide_index=False)
+    if st.button("Guardar Inventario"):
+        save_data(edited_inv)
+        st.success("Guardado.")
+
+# --- TAB 4: CARGA (COLORES RESTAURADOS) ---
+with tab4:
+    st.subheader("Alta Prenda")
+    c_a, c_b = st.columns(2)
+    with c_a:
+        temp = st.selectbox("Temporada", ["V", "W", "M"])
+        type_full = st.selectbox("Tipo", ["R - Remera", "CS - Camisa", "P - Pantalón", "C - Campera", "B - Buzo"])
+        t_code = {"R - Remera":"R", "CS - Camisa":"CS", "P - Pantalón":"P", "C - Campera":"C", "B - Buzo":"B"}[type_full]
+        cat_name = type_full.split(" - ")[1]
+        
+        if t_code == "P": attr = st.selectbox("Modelo", ["Je", "Sh", "DL", "DC", "Ve"])
+        elif t_code in ["C", "B"]: attr = f"0{st.selectbox('Abrigo', ['1', '2', '3', '4', '5'])}"
+        else: attr = st.selectbox("Manga", ["00", "01", "02"])[:2]
+        
+    with c_b:
+        occ = st.selectbox("Ocasión", ["U", "D", "C", "F"])[0]
+        # COLORES COMPLETOS
+        col_full = st.selectbox("Color", COLORS_LIST)
+        color = col_full[:2]
+        url = st.text_input("URL Foto")
+
+    prefix = f"{temp}{t_code}{attr}{occ}{color}"
+    count = len([c for c in df['Code'] if str(c).startswith(prefix)])
+    final_code = f"{prefix}{count + 1:02d}"
+    st.code(final_code)
+    
+    if st.button("Agregar"):
+        new_row = pd.DataFrame([{'Code': final_code, 'Category': cat_name, 'Season': temp, 'Occasion': occ, 'ImageURL': url, 'Status': 'Limpio', 'LastWorn': datetime.now().strftime("%Y-%m-%d"), 'Uses': 0}])
+        df = pd.concat([df, new_row], ignore_index=True)
+        save_data(df)
+        st.success(f"Agregado: {final_code}")
