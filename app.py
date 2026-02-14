@@ -3,10 +3,10 @@ import pandas as pd
 import requests
 import os
 import pytz
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v9.2", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v9.3", layout="centered", page_icon="🧥")
 
 FILE_INV = 'inventory.csv'
 FILE_FEEDBACK = 'feedback.csv'
@@ -57,12 +57,11 @@ def get_limit_for_item(category, sna_dict):
 
 def load_data():
     if not os.path.exists(FILE_INV):
-        # Agregamos 'LaundryStart' para el timer
         return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
     df = pd.read_csv(FILE_INV)
     df['Code'] = df['Code'].astype(str)
     if 'Uses' not in df.columns: df['Uses'] = 0
-    if 'LaundryStart' not in df.columns: df['LaundryStart'] = None # Compatibilidad con versiones viejas
+    if 'LaundryStart' not in df.columns: df['LaundryStart'] = None 
     return df
 
 def save_data(df): df.to_csv(FILE_INV, index=False)
@@ -94,24 +93,19 @@ def get_weather(api_key, city):
 
 # --- LÓGICA AUTOMÁTICA DE LAVADO (24 HS) ---
 def check_laundry_timers(df):
-    """Revisa si pasaron 24hs desde que se puso a lavar."""
     updated = False
     now = datetime.now()
-    
     for idx, row in df.iterrows():
         if row['Status'] == 'Lavando':
-            # Si tiene fecha de inicio, chequeamos
             if pd.notna(row['LaundryStart']):
                 try:
                     start_time = datetime.fromisoformat(str(row['LaundryStart']))
-                    # 86400 segundos = 24 horas
                     if (now - start_time).total_seconds() > 86400:
                         df.at[idx, 'Status'] = 'Limpio'
                         df.at[idx, 'Uses'] = 0
                         df.at[idx, 'LaundryStart'] = None
                         updated = True
                 except: pass
-            # Si NO tiene fecha (ej: edición manual anterior), le ponemos la de ahora para que arranque el timer
             else:
                 df.at[idx, 'LaundryStart'] = now.isoformat()
                 updated = True
@@ -171,7 +165,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v9.2 - Auto Cycle")
+st.sidebar.caption("v9.3 - Stats Edition")
 st.sidebar.markdown("---")
 api_key = st.sidebar.text_input("🔑 API Key", type="password")
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
@@ -184,7 +178,6 @@ if 'change_mode' not in st.session_state: st.session_state['change_mode'] = Fals
 if 'confirm_stage' not in st.session_state: st.session_state['confirm_stage'] = 0 
 if 'alerts_buffer' not in st.session_state: st.session_state['alerts_buffer'] = []
 
-# --- CHECK AUTOMÁTICO AL CARGAR ---
 df_checked, updated = check_laundry_timers(st.session_state['inventory'])
 if updated:
     st.session_state['inventory'] = df_checked
@@ -194,9 +187,9 @@ if updated:
 df = st.session_state['inventory']
 weather = get_weather(api_key, user_city)
 
-tab1, tab2, tab3, tab4 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item"])
+# --- AQUI ESTÁ EL CAMBIO DE LOS TABS ---
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas"])
 
-# --- TAB 1: SUGERENCIA ---
 with tab1:
     recs_df, temp_calculada = recommend_outfit(df, weather, code_occ, st.session_state['seed'])
 
@@ -306,7 +299,6 @@ with tab1:
                         idx = df[df['Code'] == alert['code']].index[0]
                         df.at[idx, 'Status'] = 'Lavando'
                         df.at[idx, 'Uses'] = 0
-                        # TIMESTAMP DE LAVADO
                         df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
                         save_data(df); st.rerun()
                     if c_w2.button("👟 Usar igual", key=f"k_{alert['code']}"):
@@ -314,7 +306,6 @@ with tab1:
                         df.at[idx, 'Uses'] = int(df.at[idx, 'Uses']) + 1; save_data(df); st.session_state['confirm_stage'] = 0; st.session_state['alerts_buffer'] = []; st.rerun()
     else: st.error("No hay ropa limpia disponible.")
 
-# --- TAB 2: LAVADERO ---
 with tab2: 
     st.subheader("🚿 Ingreso Rápido al Lavadero")
     with st.container(border=True):
@@ -330,7 +321,6 @@ with tab2:
                         idx = df[df['Code'] == code_clean].index[0]
                         df.at[idx, 'Status'] = 'Lavando'
                         df.at[idx, 'Uses'] = 0
-                        # TIMESTAMP DE LAVADO
                         df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
                         st.session_state['inventory'] = df
                         save_data(df)
@@ -353,7 +343,6 @@ with tab2:
         df.update(edited_laundry)
         for idx in df.index:
             if df.at[idx, 'Status'] == 'Lavando' and pd.isna(df.at[idx, 'LaundryStart']):
-                # Si se cambió a mano y no tiene hora, le ponemos AHORA
                 df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
                 df.at[idx, 'Uses'] = 0
             elif df.at[idx, 'Status'] == 'Sucio':
@@ -364,13 +353,11 @@ with tab2:
 
         st.session_state['inventory'] = df; save_data(df); st.success("Inventario actualizado")
 
-# --- TAB 3: INVENTARIO ---
 with tab3: 
     st.subheader("📦 Inventario Total")
     edited_inv = st.data_editor(df, num_rows="dynamic", use_container_width=True, column_config={"Uses": st.column_config.ProgressColumn("Desgaste", min_value=0, max_value=10, format="%d"), "ImageURL": st.column_config.LinkColumn("Foto")})
     if st.button("💾 Guardar Inventario"): st.session_state['inventory'] = edited_inv; save_data(edited_inv); st.toast("Guardado")
 
-# --- TAB 4: ALTA ---
 with tab4: 
     st.subheader("🏷️ Alta de Prenda (SNA Encoder)")
     with st.container(border=True):
@@ -393,3 +380,62 @@ with tab4:
         if st.button("Agregar al Inventario"):
             new = pd.DataFrame([{'Code': code, 'Category': tipo_f.split(" - ")[1], 'Season': temp, 'Occasion': occ, 'ImageURL': url, 'Status': 'Limpio', 'LastWorn': get_mendoza_time().strftime("%Y-%m-%d"), 'Uses': 0}])
             st.session_state['inventory'] = pd.concat([df, new], ignore_index=True); save_data(st.session_state['inventory']); st.success(f"¡{code} agregado correctamente!")
+
+# --- TAB 5: ESTADÍSTICAS (NUEVO) ---
+with tab5:
+    st.subheader("📊 Inteligencia de Guardarropas")
+    
+    # 1. Top 5 Usados
+    c_s1, c_s2 = st.columns(2)
+    with c_s1:
+        st.markdown("##### 🔥 Top 5 Más Usadas")
+        if not df.empty:
+            top_5 = df.sort_values(by='Uses', ascending=False).head(5)
+            st.dataframe(
+                top_5[['Code', 'Category', 'Uses']], 
+                hide_index=True, 
+                use_container_width=True,
+                column_config={"Uses": st.column_config.ProgressColumn("Usos", min_value=0, max_value=10, format="%d")}
+            )
+        else: st.info("Falta data.")
+
+    # 2. Prendas Muertas (> 90 días sin usar)
+    with c_s2:
+        st.markdown("##### 🕸️ Prendas 'Muertas' (+3 meses)")
+        try:
+            # Convertimos LastWorn a datetime para calcular
+            df['LastWorn_DT'] = pd.to_datetime(df['LastWorn'], errors='coerce')
+            limit_date = datetime.now() - timedelta(days=90)
+            dead_stock = df[(df['Status'] == 'Limpio') & (df['LastWorn_DT'] < limit_date)]
+            
+            if not dead_stock.empty:
+                st.dataframe(dead_stock[['Code', 'Category', 'LastWorn']], hide_index=True, use_container_width=True)
+            else:
+                st.success("¡Tu armario está vivo! Todo se usa.")
+        except: st.error("Error calculando fechas.")
+
+    st.divider()
+
+    # 3. Tasa de Lavado
+    st.markdown("##### 🧺 Estado del Lavadero")
+    if not df.empty:
+        total = len(df)
+        dirty = len(df[df['Status'].isin(['Sucio', 'Lavando'])])
+        rate = dirty / total
+        st.progress(rate, text=f"Tasa de Suciedad: {int(rate*100)}% ({dirty}/{total} prendas)")
+    
+    # 4. Gráfico de Satisfacción
+    st.markdown("##### 📈 Tendencia de Flow (Promedio Estrellas)")
+    if os.path.exists(FILE_FEEDBACK):
+        try:
+            fb = pd.read_csv(FILE_FEEDBACK)
+            if not fb.empty:
+                # Promedio de las 3 métricas por registro
+                fb['Avg_Score'] = (fb['Rating_Abrigo'] + fb['Rating_Comodidad'] + fb['Rating_Seguridad']) / 3
+                # Agrupar por fecha (solo dia)
+                fb['Day'] = fb['Date'].str.slice(0, 10)
+                daily_trend = fb.groupby('Day')['Avg_Score'].mean()
+                st.line_chart(daily_trend)
+            else: st.info("Registrá outfits para ver tendencias.")
+        except: st.error("Error leyendo feedback.")
+    else: st.info("Aún no hay historial de feedback.")
