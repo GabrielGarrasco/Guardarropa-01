@@ -128,57 +128,88 @@ def check_laundry_timers(df):
                 updated = True
     return df, updated
 
-# --- LÓGICA DE RECOMENDACIÓN ---
+# --- LÓGICA DE RECOMENDACIÓN (V10 - RESILIENTE Y SIEMPRE COMPLETA) ---
 def recommend_outfit(df, weather, occasion, seed):
     clean_df = df[df['Status'] == 'Limpio'].copy()
     if clean_df.empty: return pd.DataFrame(), 0
 
+    # 1. Obtener Blacklist del día
+    blacklist = set()
     if os.path.exists(FILE_FEEDBACK):
         try:
             fb = pd.read_csv(FILE_FEEDBACK)
             today_str = get_mendoza_time().strftime("%Y-%m-%d")
             rejected_today = fb[(fb['Date'].str.contains(today_str, na=False)) & (fb['Action'] == 'Rejected')]
             blacklist = set(rejected_today['Top'].dropna().tolist() + rejected_today['Bottom'].dropna().tolist() + rejected_today['Outer'].dropna().tolist())
-            clean_df = clean_df[~clean_df['Code'].isin(blacklist)]
         except: pass
 
     temp_actual = weather.get('feels_like', weather['temp']) + 3 
     temp_maxima = weather.get('max', weather['temp']) + 3
     temp_minima = weather.get('min', weather['temp']) + 3
     
-    recs = []
-    for index, row in clean_df.iterrows():
-        sna = decodificar_sna(row['Code'])
-        if not sna: continue
-        if sna['occasion'] != occasion: continue
+    final_recs = []
 
-        match = False
-        if row['Category'] == 'Pantalón':
-            tipo_pan = sna['attr']
-            if temp_maxima > 28:
-                if tipo_pan in ['Sh', 'DC']: match = True
-                elif temp_actual < 24 and tipo_pan in ['Je', 'DL']: match = True
-            elif temp_actual > 20 and tipo_pan in ['Je', 'Ve', 'DL', 'Sh']: match = True
-            elif temp_actual <= 20 and tipo_pan in ['Je', 'Ve', 'DL']: match = True
-        elif row['Category'] in ['Remera', 'Camisa']:
-            manga = sna['attr']
-            if temp_maxima > 30:
-                if manga in ['00', '01']: match = True
-            elif temp_actual < 18 and temp_maxima > 25: match = True
-            else:
-                if temp_actual > 25 and manga in ['00', '01']: match = True
-                elif temp_actual < 15 and manga in ['02']: match = True
+    def get_best_for_category(categories, is_essential=True):
+        """Busca lo ideal, si no, lo más cercano, y siempre algo si es esencial."""
+        # Filtro base: Categoría + Ocasión
+        pool = clean_df[clean_df['Category'].isin(categories) & (clean_df['Occasion'] == occasion)]
+        if pool.empty and is_essential:
+            # Fallback de emergencia: cualquier ocasión si no hay de la específica
+            pool = clean_df[clean_df['Category'].isin(categories)]
+        
+        if pool.empty: return None
+
+        # Intento 1: Filtrar por clima ideal
+        candidates = []
+        for _, row in pool.iterrows():
+            sna = decodificar_sna(row['Code'])
+            match = False
+            if row['Category'] == 'Pantalón':
+                tipo_pan = sna['attr']
+                if temp_maxima > 28:
+                    if tipo_pan in ['Sh', 'DC']: match = True
+                    elif temp_actual < 24 and tipo_pan in ['Je', 'DL']: match = True
+                elif temp_actual > 20: match = True
+                else: 
+                    if tipo_pan in ['Je', 'Ve', 'DL']: match = True
+            elif row['Category'] in ['Remera', 'Camisa']:
+                manga = sna['attr']
+                if temp_maxima > 30 and manga in ['00', '01']: match = True
+                elif temp_actual < 18 and manga == '02': match = True
                 else: match = True
-        elif row['Category'] in ['Campera', 'Buzo']:
-            try:
-                nivel = int(sna['attr'])
-                if temp_minima < 12 and nivel >= 4: match = True
-                elif temp_minima < 16 and nivel in [2, 3]: match = True
-                elif temp_minima < 22 and nivel == 1: match = True
-            except: pass
-        if match: recs.append(row)
+            elif row['Category'] in ['Campera', 'Buzo']:
+                try:
+                    nivel = int(sna['attr'])
+                    if temp_minima < 12 and nivel >= 4: match = True
+                    elif temp_minima < 16 and nivel in [2, 3]: match = True
+                    elif temp_minima < 22 and nivel == 1: match = True
+                except: pass
+            
+            if match: candidates.append(row)
 
-    return pd.DataFrame(recs), temp_actual
+        # Si es esencial y no hay ideales, usamos todo lo que haya limpio
+        final_pool = pd.DataFrame(candidates) if candidates else pool
+        
+        if final_pool.empty: return None
+
+        # Aplicar Blacklist (solo si sobran opciones)
+        non_blacklisted = final_pool[~final_pool['Code'].isin(blacklist)]
+        if not non_blacklisted.empty:
+            return non_blacklisted.sample(1, random_state=seed).iloc[0]
+        else:
+            return final_pool.sample(1, random_state=seed).iloc[0]
+
+    # Selección de las 3 partes
+    top = get_best_for_category(['Remera', 'Camisa'], is_essential=True)
+    if top is not None: final_recs.append(top)
+
+    bot = get_best_for_category(['Pantalón'], is_essential=True)
+    if bot is not None: final_recs.append(bot)
+
+    out = get_best_for_category(['Campera', 'Buzo'], is_essential=False)
+    if out is not None: final_recs.append(out)
+
+    return pd.DataFrame(final_recs), temp_actual
 
 # --- INTERFAZ ---
 st.sidebar.title("GDI: Mendoza Ops")
