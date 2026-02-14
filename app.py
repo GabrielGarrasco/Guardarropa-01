@@ -326,7 +326,7 @@ df = st.session_state['inventory']
 weather = get_weather(api_key, user_city)
 
 # --- TABS ---
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Modo Viaje"]))
 
 with tab1:
     # 1. Generamos la recomendación base
@@ -643,3 +643,85 @@ with tab5:
             else: st.info("Registrá outfits para ver tendencias.")
         except: st.error("Error leyendo feedback.")
     else: st.info("Aún no hay historial de feedback.")
+with tab6:
+    st.subheader("✈️ Despliegue Táctico (Armado de Valija)")
+    st.markdown("Generador de listas optimizado para reducción de peso y cobertura climática.")
+    
+    with st.container(border=True):
+        c_dest, c_dias, c_motivo = st.columns(3)
+        dest_city = c_dest.text_input("Destino", value="Buenos Aires")
+        num_days = c_dias.number_input("Duración (Días)", min_value=1, value=3, step=1)
+        trip_type = c_motivo.selectbox("Tipo de Misión", ["Ocio/Turismo", "Trabajo/Formal", "Aventura"])
+    
+    if st.button("🎒 Generar Loadout", type="primary", use_container_width=True):
+        # 1. Inteligencia Climática
+        w_dest = get_weather(api_key, dest_city)
+        st.info(f"🌤️ Clima en {dest_city}: {w_dest['desc'].capitalize()} | {w_dest['temp']}°C (Sensación {w_dest['feels_like']}°C)")
+        
+        # 2. Algoritmo de Selección
+        # Regla: 1 Top por día + 1 Backup. 1 Bottom cada 2 días. 1 Abrigo si < 20°C.
+        qty_tops = num_days + 1
+        qty_bots = (num_days // 2) + 1
+        qty_outer = 1 if w_dest['min'] < 20 else 0
+        
+        # Filtrar inventario limpio
+        packable = df[df['Status'] == 'Limpio'].copy()
+        
+        # Filtrar por Ocasión (Si es trabajo, priorizamos F, si es Ocio, C o D)
+        if trip_type == "Trabajo/Formal":
+            packable = packable[packable['Occasion'].isin(['F', 'U'])]
+        else:
+            packable = packable[packable['Occasion'].isin(['C', 'D', 'U'])]
+            
+        # Selección de Tops
+        tops_pool = packable[packable['Category'].isin(['Remera', 'Camisa'])]
+        if len(tops_pool) >= qty_tops:
+            selected_tops = tops_pool.sample(qty_tops, random_state=st.session_state['seed'])
+        else:
+            selected_tops = tops_pool # Llevamos todo lo que haya si no alcanza
+
+        # Selección de Bottoms (Priorizar comodidad)
+        bots_pool = packable[packable['Category'] == 'Pantalón']
+        if len(bots_pool) >= qty_bots:
+            selected_bots = bots_pool.sample(qty_bots, random_state=st.session_state['seed'])
+        else:
+            selected_bots = bots_pool
+            
+        # Selección de Abrigo (El más pesado se lleva puesto, pero lo listamos)
+        outer_pool = packable[packable['Category'].isin(['Campera', 'Buzo'])]
+        selected_outer = pd.DataFrame()
+        if qty_outer > 0 and not outer_pool.empty:
+            # Elegimos el abrigo con nivel intermedio (3) para versatilidad, o el que haya
+            try:
+                # Intentar buscar algo nivel 3 o 4
+                ideal = outer_pool[outer_pool['Code'].str.contains('C03|C04|B03')] 
+                if not ideal.empty:
+                    selected_outer = ideal.sample(1)
+                else:
+                    selected_outer = outer_pool.sample(1)
+            except:
+                selected_outer = outer_pool.sample(1)
+
+        # 3. Visualización de la Maleta
+        st.divider()
+        st.markdown("### 📋 Lista de Empaque")
+        
+        # Función para renderizar fila
+        def render_pack_row(items, label):
+            if items.empty: return
+            st.markdown(f"**{label} ({len(items)})**")
+            cols = st.columns(len(items))
+            for idx, (_, item) in enumerate(items.iterrows()):
+                with cols[idx]:
+                    img = cargar_imagen_desde_url(item['ImageURL'])
+                    if img: st.image(img, use_column_width=True)
+                    st.caption(f"{item['Category']} - {item['Code']}")
+                    st.checkbox(f"Empacado", key=f"pack_{item['Code']}")
+
+        render_pack_row(selected_tops, "👕 Tops (Rotación Diaria)")
+        render_pack_row(selected_bots, "👖 Bottoms (Reutilizables)")
+        if not selected_outer.empty:
+            render_pack_row(selected_outer, "🧥 Abrigo (Versátil)")
+            
+        # Extra Items (Hardcoded logic for engineering completeness)
+        st.warning(f"⚠️ **No olvidar:** {num_days + 2} pares de medias, {num_days + 2} ropa interior, Kit de aseo, Cargadores.")
