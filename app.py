@@ -500,27 +500,28 @@ with tab5:
     except: st.info("Falta data de feedback.")
 
 with tab6:
-    st.header("✈️ Modo Viaje: Planificador Visual")
+    st.header("✈️ Modo Viaje v2.0") # <--- Si ves esto, el código se actualizó
     
+    # --- CONFIGURACIÓN DEL VIAJE ---
     col_dest, col_days = st.columns([2, 1])
     with col_dest:
         dest_city = st.text_input("📍 Destino", value="Buenos Aires")
     with col_days:
         num_days = st.number_input("📅 Días", min_value=1, max_value=30, value=3)
 
-    # --- Lógica de Generación de Valija ---
+    # --- BOTÓN GENERAR ---
     if st.button("🎒 Generar Propuesta de Valija", type="primary", use_container_width=True):
         packable = df[df['Status'] == 'Limpio']
         
         if packable.empty:
             st.error("¡No tenés ropa limpia para viajar!")
         else:
-            # Cálculo simple de necesidades
+            # Cálculo simple
             n_tops = num_days + 1
             n_bots = (num_days // 2) + 1
-            n_out = 2  # Siempre es bueno llevar 1 o 2 abrigos extra
+            n_out = 2
             
-            # Selección aleatoria (pero priorizando lo disponible)
+            # Selección
             tops = packable[packable['Category'].isin(['Remera', 'Camisa'])]
             if len(tops) > n_tops: tops = tops.sample(n_tops)
             
@@ -530,96 +531,57 @@ with tab6:
             outs = packable[packable['Category'].isin(['Campera', 'Buzo'])]
             if len(outs) > n_out: outs = outs.sample(n_out)
             
-            # Guardamos todo junto en el session state
+            # Guardar en sesión
             st.session_state['travel_pack'] = pd.concat([tops, bots, outs])
-            # Reseteamos las selecciones de ida/vuelta anteriores
             st.session_state['travel_selections'] = {} 
+            st.rerun() # Forzamos recarga para mostrar resultados
 
-    # --- Visualización de la Valija ---
+    # --- MOSTRAR VALIJA (Solo si existe) ---
     if st.session_state.get('travel_pack') is not None:
         pack = st.session_state['travel_pack']
         st.divider()
-        st.subheader(f"🧳 Contenido de la Valija ({len(pack)} prendas)")
+        st.subheader(f"🧳 Tu Valija ({len(pack)} prendas)")
         
-        # Iteramos sobre las prendas creando una grilla de 3 columnas
         cols = st.columns(3)
         for i, (index, row) in enumerate(pack.iterrows()):
-            with cols[i % 3]:  # Distribuye en columnas 0, 1, 2
+            with cols[i % 3]:
                 with st.container(border=True):
-                    # 1. Imagen
                     img = cargar_imagen_desde_url(row['ImageURL'])
-                    if img:
-                        st.image(img, use_container_width=True)
-                    else:
-                        st.image("https://via.placeholder.com/150?text=Sin+Foto", use_container_width=True)
+                    if img: st.image(img, use_container_width=True)
+                    else: st.write("📷 Sin foto")
                     
-                    # 2. Datos
-                    st.markdown(f"**{row['Category']}**")
-                    st.caption(f"Code: `{row['Code']}`")
+                    st.caption(f"{row['Category']} ({row['Code']})")
                     
-                    # 3. Selectores Ida / Vuelta
+                    # Checkboxes
                     c_ida, c_vuelta = st.columns(2)
+                    is_ida = c_ida.checkbox("Ida", key=f"ida_{row['Code']}")
+                    is_vuelta = c_vuelta.checkbox("Vuel", key=f"vuelta_{row['Code']}")
                     
-                    # Usamos keys únicos combinando el string y el código
-                    # Nota: Agregamos key dinámica para que persista al interactuar
-                    is_ida = c_ida.checkbox("🛫 Ida", key=f"ida_{row['Code']}")
-                    is_vuelta = c_vuelta.checkbox("🛬 Vuelta", key=f"vuelta_{row['Code']}")
-                    
-                    # Guardamos la selección en tiempo real
+                    # Guardar selección
                     if 'travel_selections' not in st.session_state: st.session_state['travel_selections'] = {}
-                    
-                    # Actualizamos el diccionario con el estado actual de los checkboxes
                     st.session_state['travel_selections'][row['Code']] = {'ida': is_ida, 'vuelta': is_vuelta}
 
-        # --- Resumen del Outfit de Viaje ---
+        # --- RESUMEN ---
         st.divider()
-        st.markdown("### 🎫 Resumen de Looks")
-        
         sel = st.session_state.get('travel_selections', {})
-        # Filtramos buscando los keys que sean True en el diccionario
         ida_items = [code for code, vals in sel.items() if vals.get('ida')]
         vuelta_items = [code for code, vals in sel.items() if vals.get('vuelta')]
         
-        c_res1, c_res2 = st.columns(2)
-        with c_res1:
-            st.info(f"**Outfit de Ida:**\n" + (", ".join(ida_items) if ida_items else "Sin seleccionar"))
-        with c_res2:
-            st.success(f"**Outfit de Vuelta:**\n" + (", ".join(vuelta_items) if vuelta_items else "Sin seleccionar"))
+        c1, c2 = st.columns(2)
+        c1.info(f"🛫 **Ida:** {', '.join(ida_items) if ida_items else '---'}")
+        c2.success(f"🛬 **Vuelta:** {', '.join(vuelta_items) if vuelta_items else '---'}")
 
-        # --- CHECKLIST DE NO OLVIDAR (NUEVO) ---
+        # --- BOTÓN DE RESET ---
         st.divider()
-        st.markdown("### 🎒 Kit de Supervivencia (No Olvidar)")
-        
-        essentials = [
-            "🆔 DNI / Pasaporte", 
-            "🎫 Pasajes / SUBE", 
-            "💵 Billetera / Efectivo",
-            "🔌 Cargador Celular", 
-            "🪥 Cepillo de Dientes / Pasta", 
-            "🧴 Desodorante / Perfume", 
-            "💊 Medicamentos (Ibuprofeno/Alergia)", 
-            "🧖‍♂️ Toalla", 
-            "🕶️ Lentes de Sol",
-            "🎧 Auriculares"
-        ]
-        
-        # Mostramos los items en 2 columnas para ahorrar espacio
-        ech1, ech2 = st.columns(2)
-        for i, item in enumerate(essentials):
-            if i % 2 == 0:
-                ech1.checkbox(item, key=f"ess_{i}")
-            else:
-                ech2.checkbox(item, key=f"ess_{i}")
-
-        # --- BOTÓN FINALIZAR VIAJE (NUEVO) ---
-        st.divider()
-        if st.button("🏁 Finalizar Viaje (Borrar Valija)", type="primary", use_container_width=True):
-            # Limpiamos las variables de sesión del viaje
+        if st.button("🗑️ Borrar Valija y Empezar de Nuevo", type="secondary", use_container_width=True):
             st.session_state['travel_pack'] = None
             st.session_state['travel_selections'] = {}
-            
-            # Opcional: Limpiar los checkboxes de checklist reseteando keys si fuera necesario, 
-            # pero con rerun se limpian solos al no persistir en una variable externa.
-            
-            st.toast("¡Viaje finalizado! Valija guardada.")
             st.rerun()
+
+    # --- CHECKLIST (Siempre visible ahora) ---
+    st.divider()
+    with st.expander("📋 Checklist de Supervivencia (No olvidar)", expanded=False):
+        essentials = ["DNI / Pasaporte", "Cargador", "Cepillo Dientes", "Desodorante", "Auriculares", "Medicamentos", "Lentes", "Billetera"]
+        cols_ch = st.columns(2)
+        for i, item in enumerate(essentials):
+            cols_ch[i % 2].checkbox(item, key=f"check_{i}")
