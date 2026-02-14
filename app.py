@@ -326,7 +326,7 @@ df = st.session_state['inventory']
 weather = get_weather(api_key, user_city)
 
 # --- TABS ---
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Modo Viaje"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Modo Viaje", "💾 Sistema"])
 with tab1:
     # 1. Generamos la recomendación base
     recs_df, temp_calculada = recommend_outfit(df, weather, code_occ, st.session_state['seed'])
@@ -749,3 +749,69 @@ with tab6:
         render_pack_row(pack['outer'], "🧥 Abrigo")
             
         st.warning(f"⚠️ **No olvidar:** {num_days + 2} pares de medias/ropa interior, kit de aseo.")
+with tab7:
+    st.subheader("💾 Gestión de Datos y Respaldo")
+    st.markdown("Herramientas para evitar la pérdida de datos críticos del sistema.")
+    
+    with st.container(border=True):
+        st.markdown("### 📥 Exportar Datos (Backup)")
+        c_down1, c_down2 = st.columns(2)
+        
+        # Botón para descargar Inventario
+        if os.path.exists(FILE_INV):
+            with open(FILE_INV, "rb") as f:
+                c_down1.download_button(
+                    label="⬇️ Descargar Inventario (.csv)",
+                    data=f,
+                    file_name=f"inventory_backup_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+        else:
+            c_down1.warning("No hay inventario para descargar.")
+
+        # Botón para descargar Historial/Feedback
+        if os.path.exists(FILE_FEEDBACK):
+            with open(FILE_FEEDBACK, "rb") as f:
+                c_down2.download_button(
+                    label="⬇️ Descargar Historial (.csv)",
+                    data=f,
+                    file_name=f"feedback_backup_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+        else:
+            c_down2.warning("No hay historial para descargar.")
+
+    st.divider()
+
+    with st.container(border=True):
+        st.markdown("### 📤 Restaurar / Importar (Disaster Recovery)")
+        st.warning("⚠️ **CUIDADO:** Esto sobrescribirá los datos actuales. Úsalo solo si sabes lo que haces.")
+        
+        up_file = st.file_uploader("Subir archivo de Inventario o Historial", type=["csv"])
+        
+        if up_file is not None:
+            # Determinamos qué archivo es basándonos en las columnas
+            try:
+                df_up = pd.read_csv(up_file)
+                cols = df_up.columns.tolist()
+                
+                if 'Code' in cols and 'Category' in cols and 'Status' in cols:
+                    st.success("✅ Archivo de Inventario detectado.")
+                    if st.button("🔴 SOBRESCRIBIR INVENTARIO"):
+                        df_up.to_csv(FILE_INV, index=False)
+                        st.session_state['inventory'] = df_up
+                        st.toast("Inventario restaurado con éxito.")
+                        st.rerun()
+                        
+                elif 'Rating_Abrigo' in cols and 'Action' in cols:
+                    st.success("✅ Archivo de Historial detectado.")
+                    if st.button("🔴 SOBRESCRIBIR HISTORIAL"):
+                        df_up.to_csv(FILE_FEEDBACK, index=False)
+                        st.toast("Historial restaurado con éxito.")
+                        st.rerun()
+                else:
+                    st.error("❌ Formato de archivo desconocido. No coincide con Inventario ni Historial.")
+            except Exception as e:
+                st.error(f"Error al leer el archivo: {e}")
