@@ -28,7 +28,12 @@ def get_mendoza_time():
         return datetime.now(tz)
     except:
         return datetime.now()
-
+def get_current_season():
+    """Determina la temporada actual en Mendoza (Hemisferio Sur)."""
+    month = get_mendoza_time().month
+    if month in [12, 1, 2]: return 'V'  # Verano
+    if month in [6, 7, 8]: return 'W'   # Invierno
+    return 'M'                         # Media (Otoño/Primavera)
 # <--- FUNCION NUEVA AGREGADA PARA ARREGLAR LAS FOTOS EN EL CELU --->
 @st.cache_data(show_spinner=False)
 def cargar_imagen_desde_url(url):
@@ -128,12 +133,11 @@ def check_laundry_timers(df):
                 updated = True
     return df, updated
 
-# --- LÓGICA DE RECOMENDACIÓN (V10 - RESILIENTE Y SIEMPRE COMPLETA) ---
+# --- LÓGICA DE RECOMENDACIÓN (V11 - CON FILTRO DE TEMPORADA 'T') ---
 def recommend_outfit(df, weather, occasion, seed):
     clean_df = df[df['Status'] == 'Limpio'].copy()
     if clean_df.empty: return pd.DataFrame(), 0
 
-    # 1. Obtener Blacklist del día
     blacklist = set()
     if os.path.exists(FILE_FEEDBACK):
         try:
@@ -150,16 +154,26 @@ def recommend_outfit(df, weather, occasion, seed):
     final_recs = []
 
     def get_best_for_category(categories, is_essential=True):
-        """Busca lo ideal, si no, lo más cercano, y siempre algo si es esencial."""
-        # Filtro base: Categoría + Ocasión
-        pool = clean_df[clean_df['Category'].isin(categories) & (clean_df['Occasion'] == occasion)]
+        curr_season = get_current_season()
+        
+        # 1. Pool Inicial: Filtrar por Categoría + Ocasión + Temporada (Actual o 'T')
+        pool = clean_df[
+            (clean_df['Category'].isin(categories)) & 
+            (clean_df['Occasion'] == occasion) & 
+            ((clean_df['Season'] == curr_season) | (clean_df['Season'] == 'T'))
+        ]
+        
+        # Fallback A: Si no hay nada, ignoramos la temporada pero mantenemos la ocasión
+        if pool.empty:
+            pool = clean_df[(clean_df['Category'].isin(categories)) & (clean_df['Occasion'] == occasion)]
+            
+        # Fallback B: Si sigue vacío y es esencial, ignoramos hasta la ocasión
         if pool.empty and is_essential:
-            # Fallback de emergencia: cualquier ocasión si no hay de la específica
             pool = clean_df[clean_df['Category'].isin(categories)]
         
         if pool.empty: return None
 
-        # Intento 1: Filtrar por clima ideal
+        # 2. Filtrar por clima ideal
         candidates = []
         for _, row in pool.iterrows():
             sna = decodificar_sna(row['Code'])
@@ -187,19 +201,13 @@ def recommend_outfit(df, weather, occasion, seed):
             
             if match: candidates.append(row)
 
-        # Si es esencial y no hay ideales, usamos todo lo que haya limpio
         final_pool = pd.DataFrame(candidates) if candidates else pool
-        
-        if final_pool.empty: return None
-
-        # Aplicar Blacklist (solo si sobran opciones)
         non_blacklisted = final_pool[~final_pool['Code'].isin(blacklist)]
         if not non_blacklisted.empty:
             return non_blacklisted.sample(1, random_state=seed).iloc[0]
         else:
             return final_pool.sample(1, random_state=seed).iloc[0]
 
-    # Selección de las 3 partes
     top = get_best_for_category(['Remera', 'Camisa'], is_essential=True)
     if top is not None: final_recs.append(top)
 
@@ -416,7 +424,7 @@ with tab4:
     with st.container(border=True):
         c1, c2 = st.columns(2)
         with c1:
-            temp = st.selectbox("Temporada", ["V (Verano)", "W (Invierno)", "M (Media)"]).split(" ")[0]
+            temp = st.selectbox("Temporada", ["V (Verano)", "W (Invierno)", "M (Media)", "T (Toda Estación)"]).split(" ")[0]
             tipo_f = st.selectbox("Tipo", ["R - Remera", "CS - Camisa", "P - Pantalón", "C - Campera", "B - Buzo"])
             t_code = {"R - Remera":"R", "CS - Camisa":"CS", "P - Pantalón":"P", "C - Campera":"C", "B - Buzo":"B"}[tipo_f]
             if t_code == "P": attr = st.selectbox("Corte", ["Je (Jean)", "Sh (Short)", "DL (Deportivo)", "DC (Corto)", "Ve (Vestir)"]).split(" ")[0]
