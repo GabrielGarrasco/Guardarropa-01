@@ -128,25 +128,27 @@ def check_laundry_timers(df):
                 updated = True
     return df, updated
 
-# --- LÓGICA DE RECOMENDACIÓN ---
+# --- LÓGICA DE RECOMENDACIÓN (CORREGIDA CON FALLBACK) ---
 def recommend_outfit(df, weather, occasion, seed):
     clean_df = df[df['Status'] == 'Limpio'].copy()
     if clean_df.empty: return pd.DataFrame(), 0
 
+    # 1. Identificar Blacklist (lo rechazado hoy) pero NO filtrar todavía
+    blacklist = set()
     if os.path.exists(FILE_FEEDBACK):
         try:
             fb = pd.read_csv(FILE_FEEDBACK)
             today_str = get_mendoza_time().strftime("%Y-%m-%d")
             rejected_today = fb[(fb['Date'].str.contains(today_str, na=False)) & (fb['Action'] == 'Rejected')]
             blacklist = set(rejected_today['Top'].dropna().tolist() + rejected_today['Bottom'].dropna().tolist() + rejected_today['Outer'].dropna().tolist())
-            clean_df = clean_df[~clean_df['Code'].isin(blacklist)]
         except: pass
 
     temp_actual = weather.get('feels_like', weather['temp']) + 3 
     temp_maxima = weather.get('max', weather['temp']) + 3
     temp_minima = weather.get('min', weather['temp']) + 3
     
-    recs = []
+    # 2. Buscar TODOS los candidatos válidos por clima (incluyendo los de la blacklist)
+    candidates = []
     for index, row in clean_df.iterrows():
         sna = decodificar_sna(row['Code'])
         if not sna: continue
@@ -176,9 +178,41 @@ def recommend_outfit(df, weather, occasion, seed):
                 elif temp_minima < 16 and nivel in [2, 3]: match = True
                 elif temp_minima < 22 and nivel == 1: match = True
             except: pass
-        if match: recs.append(row)
+        
+        if match: candidates.append(row)
 
-    return pd.DataFrame(recs), temp_actual
+    if not candidates: return pd.DataFrame(), temp_actual
+
+    # 3. Selección Inteligente con FALLBACK
+    df_candidates = pd.DataFrame(candidates)
+    final_recs = []
+
+    def select_best_item(category_list):
+        """Intenta elegir algo no rechazado. Si no hay, elige lo rechazado."""
+        subset = df_candidates[df_candidates['Category'].isin(category_list)]
+        if subset.empty: return None
+        
+        # Opción A: Items que NO están en blacklist
+        good_options = subset[~subset['Code'].isin(blacklist)]
+        
+        if not good_options.empty:
+            return good_options.sample(1, random_state=seed).iloc[0]
+        else:
+            # Opción B (Fallback): Si TODO está en blacklist, devolvemos uno de la blacklist igual
+            # Esto evita que desaparezca la prenda si es la única que tenés.
+            return subset.sample(1, random_state=seed).iloc[0]
+
+    # Ejecutar selección para cada parte
+    top = select_best_item(['Remera', 'Camisa'])
+    if top is not None: final_recs.append(top)
+
+    bot = select_best_item(['Pantalón'])
+    if bot is not None: final_recs.append(bot)
+
+    out = select_best_item(['Campera', 'Buzo'])
+    if out is not None: final_recs.append(out)
+
+    return pd.DataFrame(final_recs), temp_actual
 
 # --- INTERFAZ ---
 st.sidebar.title("GDI: Mendoza Ops")
