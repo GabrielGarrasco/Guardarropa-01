@@ -6,7 +6,7 @@ import pytz
 from datetime import datetime
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v9.1", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v9.2", layout="centered", page_icon="🧥")
 
 FILE_INV = 'inventory.csv'
 FILE_FEEDBACK = 'feedback.csv'
@@ -57,10 +57,12 @@ def get_limit_for_item(category, sna_dict):
 
 def load_data():
     if not os.path.exists(FILE_INV):
-        return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses'])
+        # Agregamos 'LaundryStart' para el timer
+        return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
     df = pd.read_csv(FILE_INV)
     df['Code'] = df['Code'].astype(str)
     if 'Uses' not in df.columns: df['Uses'] = 0
+    if 'LaundryStart' not in df.columns: df['LaundryStart'] = None # Compatibilidad con versiones viejas
     return df
 
 def save_data(df): df.to_csv(FILE_INV, index=False)
@@ -90,12 +92,36 @@ def get_weather(api_key, city):
         }
     except: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error Conexión"}
 
+# --- LÓGICA AUTOMÁTICA DE LAVADO (24 HS) ---
+def check_laundry_timers(df):
+    """Revisa si pasaron 24hs desde que se puso a lavar."""
+    updated = False
+    now = datetime.now()
+    
+    for idx, row in df.iterrows():
+        if row['Status'] == 'Lavando':
+            # Si tiene fecha de inicio, chequeamos
+            if pd.notna(row['LaundryStart']):
+                try:
+                    start_time = datetime.fromisoformat(str(row['LaundryStart']))
+                    # 86400 segundos = 24 horas
+                    if (now - start_time).total_seconds() > 86400:
+                        df.at[idx, 'Status'] = 'Limpio'
+                        df.at[idx, 'Uses'] = 0
+                        df.at[idx, 'LaundryStart'] = None
+                        updated = True
+                except: pass
+            # Si NO tiene fecha (ej: edición manual anterior), le ponemos la de ahora para que arranque el timer
+            else:
+                df.at[idx, 'LaundryStart'] = now.isoformat()
+                updated = True
+    return df, updated
+
 # --- LÓGICA DE RECOMENDACIÓN ---
 def recommend_outfit(df, weather, occasion, seed):
     clean_df = df[df['Status'] == 'Limpio'].copy()
     if clean_df.empty: return pd.DataFrame(), 0
 
-    # Filtro Anti-Rebote (Blacklist de hoy)
     if os.path.exists(FILE_FEEDBACK):
         try:
             fb = pd.read_csv(FILE_FEEDBACK)
@@ -145,7 +171,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v9.1 - UI Upgrade")
+st.sidebar.caption("v9.2 - Auto Cycle")
 st.sidebar.markdown("---")
 api_key = st.sidebar.text_input("🔑 API Key", type="password")
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
@@ -157,6 +183,13 @@ if 'seed' not in st.session_state: st.session_state['seed'] = 42
 if 'change_mode' not in st.session_state: st.session_state['change_mode'] = False
 if 'confirm_stage' not in st.session_state: st.session_state['confirm_stage'] = 0 
 if 'alerts_buffer' not in st.session_state: st.session_state['alerts_buffer'] = []
+
+# --- CHECK AUTOMÁTICO AL CARGAR ---
+df_checked, updated = check_laundry_timers(st.session_state['inventory'])
+if updated:
+    st.session_state['inventory'] = df_checked
+    save_data(df_checked)
+    st.toast("🧺 Ropa limpia recuperada automáticamente")
 
 df = st.session_state['inventory']
 weather = get_weather(api_key, user_city)
@@ -232,7 +265,6 @@ with tab1:
         else:
             if st.session_state['confirm_stage'] == 0:
                 st.markdown("### ⭐ Calificación del día")
-                # --- MODIFICACIÓN 1: LABELS PARA ESTRELLAS ---
                 c_fb1, c_fb2, c_fb3 = st.columns(3)
                 with c_fb1: 
                     st.markdown("**🌡️ Nivel de Abrigo**")
@@ -272,7 +304,11 @@ with tab1:
                     c_w1, c_w2 = st.columns(2)
                     if c_w1.button("🧼 Lavar", key=f"w_{alert['code']}"):
                         idx = df[df['Code'] == alert['code']].index[0]
-                        df.at[idx, 'Status'] = 'Sucio'; df.at[idx, 'Uses'] = 0; save_data(df); st.rerun()
+                        df.at[idx, 'Status'] = 'Lavando'
+                        df.at[idx, 'Uses'] = 0
+                        # TIMESTAMP DE LAVADO
+                        df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
+                        save_data(df); st.rerun()
                     if c_w2.button("👟 Usar igual", key=f"k_{alert['code']}"):
                         idx = df[df['Code'] == alert['code']].index[0]
                         df.at[idx, 'Uses'] = int(df.at[idx, 'Uses']) + 1; save_data(df); st.session_state['confirm_stage'] = 0; st.session_state['alerts_buffer'] = []; st.rerun()
@@ -280,27 +316,25 @@ with tab1:
 
 # --- TAB 2: LAVADERO ---
 with tab2: 
-    # --- MODIFICACIÓN 2: INPUT DE LAVADO RÁPIDO ---
     st.subheader("🚿 Ingreso Rápido al Lavadero")
     with st.container(border=True):
         col_input, col_btn = st.columns([3, 1])
         with col_input:
-            # Usamos form para que el Enter funcione nativamente
             with st.form("quick_wash_form", clear_on_submit=True):
-                code_input = st.text_input("Ingresar Código (ej: VR01C0501)", placeholder="Escribí el código aquí...")
+                code_input = st.text_input("Ingresar Código", placeholder="Ej: VR01C0501...")
                 submitted = st.form_submit_button("🧼 Mandar a Lavar", use_container_width=True)
                 
                 if submitted and code_input:
                     code_clean = code_input.strip().upper()
                     if code_clean in df['Code'].values:
                         idx = df[df['Code'] == code_clean].index[0]
-                        # Cambio de Estado Lógico
                         df.at[idx, 'Status'] = 'Lavando'
                         df.at[idx, 'Uses'] = 0
-                        
+                        # TIMESTAMP DE LAVADO
+                        df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
                         st.session_state['inventory'] = df
                         save_data(df)
-                        st.success(f"✅ {code_clean} enviado a lavar.")
+                        st.success(f"✅ {code_clean} enviado a lavar (vuelve en 24hs).")
                         st.rerun()
                     else:
                         st.error(f"❌ El código {code_clean} no existe.")
@@ -318,7 +352,16 @@ with tab2:
     if st.button("🔄 Actualizar Planilla Completa"):
         df.update(edited_laundry)
         for idx in df.index:
-            if df.at[idx, 'Status'] in ['Lavando', 'Sucio']: df.at[idx, 'Uses'] = 0
+            if df.at[idx, 'Status'] == 'Lavando' and pd.isna(df.at[idx, 'LaundryStart']):
+                # Si se cambió a mano y no tiene hora, le ponemos AHORA
+                df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
+                df.at[idx, 'Uses'] = 0
+            elif df.at[idx, 'Status'] == 'Sucio':
+                df.at[idx, 'Uses'] = 0
+                df.at[idx, 'LaundryStart'] = None
+            elif df.at[idx, 'Status'] == 'Limpio':
+                 df.at[idx, 'LaundryStart'] = None
+
         st.session_state['inventory'] = df; save_data(df); st.success("Inventario actualizado")
 
 # --- TAB 3: INVENTARIO ---
