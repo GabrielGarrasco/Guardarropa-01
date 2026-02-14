@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v8.0", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v8.1", layout="centered", page_icon="🧥")
 
 FILE_INV = 'inventory.csv'
 FILE_FEEDBACK = 'feedback.csv'
@@ -276,9 +276,6 @@ with tab1:
                             remaining_alerts.append(alert)
             
             # Si el usuario interactuó (los botones reinician el script), verificamos si quedan alertas
-            # Nota: Streamlit es stateless. Al hacer click en un botón arriba, se ejecuta, guarda data y hace rerun.
-            # Necesitamos un botón "Continuar" final si quedan dudas, o detectar si se resolvieron.
-            
             if st.button("Continuar a Calificación"):
                 st.session_state['confirm_stage'] = 2
                 st.session_state['alerts_buffer'] = []
@@ -318,7 +315,6 @@ with tab1:
                 save_feedback_entry(entry)
                 st.session_state['confirm_stage'] = 0 # Reiniciar ciclo
                 st.toast("Feedback guardado exitosamente!", icon="🎉")
-                # Opcional: st.rerun() para limpiar pantalla
 
     else:
         st.error("No encontré ropa limpia adecuada.")
@@ -406,7 +402,8 @@ with tab4:
             if type_code == "P": 
                 c_attr = st.selectbox("Corte", ["Je (Jean)", "Sh (Short)", "DL (Deportivo Largo)", "DC (Dep. Corto)", "Ve (Vestir)"]).split(" ")[0]
             elif type_code in ["C", "B"]: 
-                c_attr = f"0{st.selectbox('Nivel Abrigo (1-5)', ['1 (Liviano)', '2', '3', '4', '5 (Pesado)']).split(' ')[0]}"
+                # AQUÍ ESTÁ EL CAMBIO SOLICITADO
+                c_attr = f"0{st.selectbox('Nivel Abrigo', ['1 (Rompevientos)', '2 (Liviana)', '3 (Normal)', '4 (Gruesa)', '5 (Muy Gruesa)']).split(' ')[0]}"
             else: 
                 c_attr = st.selectbox("Manga", ["00 (Musculosa)", "01 (Corta)", "02 (Larga)"]).split(" ")[0]
 
