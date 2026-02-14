@@ -17,19 +17,35 @@ LIMITES_USO = {
     "B": 5, "C": 10
 }
 
-# --- FUNCIONES AUXILIARES ---
 def decodificar_sna(codigo):
+    """
+    Parsea el código SNA. CORREGIDO v8.3.1
+    """
     try:
         codigo = str(codigo).strip()
         if len(codigo) < 4: return None
-        if codigo[1:3] == 'CS':
-            tipo = 'CS'; idx_start_attr = 3
+        
+        # Detectar tipo (R, CS, P, C, B)
+        if len(codigo) > 2 and codigo[1:3] == 'CS':
+            tipo = 'CS'
+            idx_start_attr = 3
         else:
-            tipo = codigo[1]; idx_start_attr = 2
+            tipo = codigo[1]
+            idx_start_attr = 2
+            
         attr = codigo[idx_start_attr : idx_start_attr + 2]
-        idx_occ = codigo[idx_start_attr + 2] if len(codigo) > idx_start_attr + 2 else "C"
+        
+        # AQUÍ ESTABA EL ERROR:
+        idx_letra_ocasion = idx_start_attr + 2
+        
+        if len(codigo) > idx_letra_ocasion:
+            occasion = codigo[idx_letra_ocasion]
+        else:
+            occasion = "C" # Default casual si no tiene letra
+            
         return {"tipo": tipo, "attr": attr, "occasion": occasion}
-    except: return None
+    except:
+        return None
 
 def load_data():
     if not os.path.exists(FILE_INV):
