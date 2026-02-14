@@ -11,9 +11,9 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v10", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v10.1", layout="centered", page_icon="🧥")
 
-# --- CONEXIÓN A GOOGLE SHEETS (LA PARTE NUEVA) ---
+# --- CONEXIÓN A GOOGLE SHEETS ---
 def get_google_sheet_client():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -22,40 +22,30 @@ def get_google_sheet_client():
         client = gspread.authorize(creds)
         return client
     except Exception as e:
-        st.error(f"⚠️ Error de conexión con Google: {e}")
         return None
 
 def load_data_gsheet():
-    """Carga el inventario desde Google Sheets."""
     client = get_google_sheet_client()
     if not client: return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
-    
     try:
         sheet = client.open("GDI_Database").worksheet("inventory")
         data = sheet.get_all_records()
-        if not data:
-             return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
-        
+        if not data: return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
         df = pd.DataFrame(data)
-        df = df.astype(str) # Convertimos a texto para evitar errores
+        df = df.astype(str)
         return df
-    except Exception as e:
-        # Si falla, devuelve vacío pero no rompe la app
-        return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
+    except: return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
 
 def save_data_gsheet(df):
-    """Guarda en la nube."""
     client = get_google_sheet_client()
     if not client: return
-
     try:
         sheet = client.open("GDI_Database").worksheet("inventory")
         sheet.clear()
         df_str = df.astype(str)
         datos = [df_str.columns.values.tolist()] + df_str.values.tolist()
         sheet.update(datos)
-    except Exception as e:
-        st.error(f"No se pudo guardar: {e}")
+    except: pass
 
 def load_feedback_gsheet():
     client = get_google_sheet_client()
@@ -64,8 +54,7 @@ def load_feedback_gsheet():
         sheet = client.open("GDI_Database").worksheet("feedback")
         data = sheet.get_all_records()
         return pd.DataFrame(data)
-    except:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
 def save_feedback_entry_gsheet(entry):
     client = get_google_sheet_client()
@@ -76,25 +65,17 @@ def save_feedback_entry_gsheet(entry):
         sheet.append_row(row)
     except: pass
 
-# --- LÍMITES DE USO (TU LÓGICA ORIGINAL) ---
-LIMITES_USO = {
-    "Je": 6, "Ve": 4, "DL": 3, "DC": 2, "Sh": 1, # Pantalones
-    "R": 2, "CS": 3,                             # Tops
-    "B": 5, "C": 10                              # Abrigos
-}
+# --- LÍMITES Y FUNCIONES ---
+LIMITES_USO = {"Je": 6, "Ve": 4, "DL": 3, "DC": 2, "Sh": 1, "R": 2, "CS": 3, "B": 5, "C": 10}
 
-# --- FUNCIONES AUXILIARES ---
 def get_mendoza_time():
-    try:
-        tz = pytz.timezone('America/Argentina/Mendoza')
-        return datetime.now(tz)
-    except:
-        return datetime.now()
+    try: return datetime.now(pytz.timezone('America/Argentina/Mendoza'))
+    except: return datetime.now()
 
 def get_current_season():
-    month = get_mendoza_time().month
-    if month in [12, 1, 2]: return 'V'
-    if month in [6, 7, 8]: return 'W'
+    m = get_mendoza_time().month
+    if m in [12, 1, 2]: return 'V'
+    if m in [6, 7, 8]: return 'W'
     return 'M'
 
 @st.cache_data(show_spinner=False)
@@ -102,33 +83,25 @@ def cargar_imagen_desde_url(url):
     if not url: return None
     try:
         response = requests.get(url, timeout=3)
-        if response.status_code == 200:
-            return Image.open(BytesIO(response.content))
-    except:
-        return None
-    return None
+        if response.status_code == 200: return Image.open(BytesIO(response.content))
+    except: return None
 
 def decodificar_sna(codigo):
     try:
-        codigo = str(codigo).strip().upper()
-        if len(codigo) < 4: return None
-        season = codigo[0]
-        if len(codigo) > 2 and codigo[1:3] == 'CS':
-            tipo = 'CS'; idx_start_attr = 3
-        else:
-            tipo = codigo[1]; idx_start_attr = 2
-        attr = codigo[idx_start_attr : idx_start_attr + 2]
-        idx_occ = idx_start_attr + 2
-        occasion = codigo[idx_occ] if len(codigo) > idx_occ else "C"
-        return {"season": season, "tipo": tipo, "attr": attr, "occasion": occasion}
+        c = str(codigo).strip().upper()
+        if len(c) < 4: return None
+        season = c[0]
+        if len(c) > 2 and c[1:3] == 'CS': tipo = 'CS'; idx = 3
+        else: tipo = c[1]; idx = 2
+        attr = c[idx:idx+2]
+        return {"season": season, "tipo": tipo, "attr": attr}
     except: return None
 
-def get_limit_for_item(category, sna_dict):
-    if not sna_dict: return 5
-    if category == 'Pantalón': return LIMITES_USO.get(sna_dict['attr'], 3)
-    elif category in ['Remera', 'Camisa']: return LIMITES_USO.get(sna_dict['tipo'], 2)
-    elif category in ['Campera', 'Buzo']: return LIMITES_USO.get(sna_dict['tipo'], 5)
-    return 5
+def get_limit_for_item(category, sna):
+    if not sna: return 5
+    if category == 'Pantalón': return LIMITES_USO.get(sna['attr'], 3)
+    elif category in ['Remera', 'Camisa']: return LIMITES_USO.get(sna['tipo'], 2)
+    return LIMITES_USO.get(sna['tipo'], 5)
 
 def get_weather(api_key, city):
     if not api_key: return {"temp": 24, "feels_like": 22, "min": 18, "max": 30, "desc": "Modo Demo"}
@@ -136,138 +109,112 @@ def get_weather(api_key, city):
         url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric&lang=es"
         res = requests.get(url).json()
         if res.get("cod") != 200: return {"temp": 0, "feels_like": 0, "min": 0, "max": 0, "desc": "Error API"}
-        return {
-            "temp": res['main']['temp'],
-            "feels_like": res['main']['feels_like'],
-            "min": res['main']['temp_min'], 
-            "max": res['main']['temp_max'], 
-            "desc": res['weather'][0]['description'].capitalize()
-        }
+        return {"temp": res['main']['temp'], "feels_like": res['main']['feels_like'], "min": res['main']['temp_min'], "max": res['main']['temp_max'], "desc": res['weather'][0]['description'].capitalize()}
     except: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error Conexión"}
 
-# --- LÓGICA AUTOMÁTICA DE LAVADO (24 HS) ---
 def check_laundry_timers(df):
     updated = False
     now = datetime.now()
     for idx, row in df.iterrows():
         if row['Status'] == 'Lavando':
-            if pd.notna(row['LaundryStart']) and str(row['LaundryStart']) != '' and str(row['LaundryStart']) != 'nan':
+            if pd.notna(row['LaundryStart']) and str(row['LaundryStart']) not in ['', 'nan']:
                 try:
-                    start_time = datetime.fromisoformat(str(row['LaundryStart']))
-                    if (now - start_time).total_seconds() > 86400:
-                        df.at[idx, 'Status'] = 'Limpio'
-                        df.at[idx, 'Uses'] = 0
-                        df.at[idx, 'LaundryStart'] = ''
-                        updated = True
+                    start = datetime.fromisoformat(str(row['LaundryStart']))
+                    if (now - start).total_seconds() > 86400:
+                        df.at[idx, 'Status'] = 'Limpio'; df.at[idx, 'Uses'] = 0; df.at[idx, 'LaundryStart'] = ''; updated = True
                 except: pass
             else:
-                # Si está lavando pero no tiene fecha, le ponemos fecha de hoy
-                df.at[idx, 'LaundryStart'] = now.isoformat()
-                updated = True
+                df.at[idx, 'LaundryStart'] = now.isoformat(); updated = True
     return df, updated
 
-# --- LÓGICA DE RECOMENDACIÓN ---
 def recommend_outfit(df, weather, occasion, seed):
-    clean_df = df[df['Status'] == 'Limpio'].copy()
-    if clean_df.empty: return pd.DataFrame(), 0
-
+    clean = df[df['Status'] == 'Limpio'].copy()
+    if clean.empty: return pd.DataFrame(), 0
     blacklist = set()
     try:
         fb = load_feedback_gsheet()
         if not fb.empty:
-            today_str = get_mendoza_time().strftime("%Y-%m-%d")
+            today = get_mendoza_time().strftime("%Y-%m-%d")
             fb['Date'] = fb['Date'].astype(str)
-            rejected_today = fb[(fb['Date'].str.contains(today_str, na=False)) & (fb['Action'] == 'Rejected')]
-            blacklist = set(rejected_today['Top'].dropna().tolist() + rejected_today['Bottom'].dropna().tolist() + rejected_today['Outer'].dropna().tolist())
+            rej = fb[(fb['Date'].str.contains(today, na=False)) & (fb['Action'] == 'Rejected')]
+            blacklist = set(rej['Top'].dropna().tolist() + rej['Bottom'].dropna().tolist() + rej['Outer'].dropna().tolist())
     except: pass
-
-    temp_actual = weather.get('feels_like', weather['temp']) + 3 
-    temp_maxima = weather.get('max', weather['temp']) + 3
-    temp_minima = weather.get('min', weather['temp']) + 3
     
-    final_recs = []
+    t_feel = weather.get('feels_like', weather['temp']) + 3
+    t_max = weather.get('max', weather['temp']) + 3
+    t_min = weather.get('min', weather['temp']) + 3
+    final = []
 
-    def get_best_for_category(categories, is_essential=True):
-        curr_season = get_current_season()
-        pool = clean_df[
-            (clean_df['Category'].isin(categories)) & 
-            (clean_df['Occasion'] == occasion) & 
-            ((clean_df['Season'] == curr_season) | (clean_df['Season'] == 'T'))
-        ]
-        if pool.empty: pool = clean_df[(clean_df['Category'].isin(categories)) & (clean_df['Occasion'] == occasion)]
-        if pool.empty and is_essential: pool = clean_df[clean_df['Category'].isin(categories)]
+    def get_best(cats, ess=True):
+        curr_s = get_current_season()
+        pool = clean[(clean['Category'].isin(cats)) & (clean['Occasion'] == occasion) & ((clean['Season'] == curr_s) | (clean['Season'] == 'T'))]
+        if pool.empty: pool = clean[(clean['Category'].isin(cats)) & (clean['Occasion'] == occasion)]
+        if pool.empty and ess: pool = clean[clean['Category'].isin(cats)]
         if pool.empty: return None
-
-        candidates = []
-        for _, row in pool.iterrows():
-            sna = decodificar_sna(row['Code'])
+        
+        cands = []
+        for _, r in pool.iterrows():
+            sna = decodificar_sna(r['Code'])
             if not sna: continue
             match = False
-            if row['Category'] == 'Pantalón':
-                tipo_pan = sna['attr']
-                if temp_maxima > 28:
-                    if tipo_pan in ['Sh', 'DC']: match = True
-                    elif temp_actual < 24 and tipo_pan in ['Je', 'DL']: match = True
-                elif temp_actual > 20: match = True
+            if r['Category'] == 'Pantalón':
+                attr = sna['attr']
+                if t_max > 28:
+                    if attr in ['Sh', 'DC']: match = True
+                    elif t_feel < 24 and attr in ['Je', 'DL']: match = True
+                elif t_feel > 20: match = True
                 else: 
-                    if tipo_pan in ['Je', 'Ve', 'DL']: match = True
-            elif row['Category'] in ['Remera', 'Camisa']:
-                manga = sna['attr']
-                if temp_maxima > 30 and manga in ['00', '01']: match = True
-                elif temp_actual < 18 and manga == '02': match = True
+                    if attr in ['Je', 'Ve', 'DL']: match = True
+            elif r['Category'] in ['Remera', 'Camisa']:
+                attr = sna['attr']
+                if t_max > 30 and attr in ['00', '01']: match = True
+                elif t_feel < 18 and attr == '02': match = True
                 else: match = True
-            elif row['Category'] in ['Campera', 'Buzo']:
+            elif r['Category'] in ['Campera', 'Buzo']:
                 try:
-                    nivel = int(sna['attr'])
-                    if temp_minima < 12 and nivel >= 4: match = True
-                    elif temp_minima < 16 and nivel in [2, 3]: match = True
-                    elif temp_minima < 22 and nivel == 1: match = True
+                    lvl = int(sna['attr'])
+                    if t_min < 12 and lvl >= 4: match = True
+                    elif t_min < 16 and lvl in [2, 3]: match = True
+                    elif t_min < 22 and lvl == 1: match = True
                 except: pass
-            
-            if match: candidates.append(row)
+            if match: cands.append(r)
+        
+        f_pool = pd.DataFrame(cands) if cands else pool
+        nb = f_pool[~f_pool['Code'].isin(blacklist)]
+        return nb.sample(1, random_state=seed).iloc[0] if not nb.empty else f_pool.sample(1, random_state=seed).iloc[0]
 
-        final_pool = pd.DataFrame(candidates) if candidates else pool
-        non_blacklisted = final_pool[~final_pool['Code'].isin(blacklist)]
-        if not non_blacklisted.empty:
-            return non_blacklisted.sample(1, random_state=seed).iloc[0]
-        else:
-            return final_pool.sample(1, random_state=seed).iloc[0]
+    top = get_best(['Remera', 'Camisa']); 
+    if top is not None: final.append(top)
+    bot = get_best(['Pantalón']); 
+    if bot is not None: final.append(bot)
+    out = get_best(['Campera', 'Buzo'], False)
+    if out is not None: final.append(out)
+    return pd.DataFrame(final), t_feel
 
-    top = get_best_for_category(['Remera', 'Camisa'], is_essential=True)
-    if top is not None: final_recs.append(top)
-    bot = get_best_for_category(['Pantalón'], is_essential=True)
-    if bot is not None: final_recs.append(bot)
-    out = get_best_for_category(['Campera', 'Buzo'], is_essential=False)
-    if out is not None: final_recs.append(out)
-
-    return pd.DataFrame(final_recs), temp_actual
-
-# --- INTERFAZ ---
+# --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v10 - Full Cloud")
-st.sidebar.markdown("---")
+st.sidebar.caption("v10.1 - Full Cloud")
 
-# API KEY (Secrets)
+# API KEY AUTOMÁTICA
 if "openweathermap" in st.secrets:
     api_key = st.secrets["openweathermap"]["api_key"]
 else:
-    api_key = st.sidebar.text_input("🔑 Ingresar API Key OWM", type="password")
+    api_key = st.sidebar.text_input("🔑 API Key OWM", type="password")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
 code_occ = user_occ[0]
 
-# --- CARGA DE DATOS ---
+# CARGA DE DATOS
 if 'inventory' not in st.session_state: 
-    with st.spinner("Conectando a Google Sheets..."):
+    with st.spinner("Cargando sistema..."):
         st.session_state['inventory'] = load_data_gsheet()
-
 if 'seed' not in st.session_state: st.session_state['seed'] = 42
+if 'custom_overrides' not in st.session_state: st.session_state['custom_overrides'] = {}
 if 'change_mode' not in st.session_state: st.session_state['change_mode'] = False
 if 'confirm_stage' not in st.session_state: st.session_state['confirm_stage'] = 0 
 if 'alerts_buffer' not in st.session_state: st.session_state['alerts_buffer'] = []
 
-# Chequeo de lavandería
 df_checked, updated = check_laundry_timers(st.session_state['inventory'])
 if updated:
     st.session_state['inventory'] = df_checked
@@ -276,25 +223,45 @@ if updated:
 df = st.session_state['inventory']
 weather = get_weather(api_key, user_city)
 
+# --- VISOR OUTFIT ACTUAL (RECUPERADO) ---
+with st.sidebar:
+    st.divider()
+    try:
+        fb = load_feedback_gsheet()
+        if not fb.empty:
+            accepted = fb[fb['Action'] == 'Accepted']
+            if not accepted.empty:
+                last = accepted.iloc[-1]
+                with st.expander("🕴️ Puesto Ahora", expanded=True):
+                    st.caption(f"📅 {last['Date']}")
+                    
+                    def show_mini(code, label):
+                        if code and code != 'N/A' and code != 'nan':
+                            row = df[df['Code'] == code]
+                            if not row.empty:
+                                img = row.iloc[0]['ImageURL']
+                                st.image(cargar_imagen_desde_url(img), width=80) if img else st.write(f"{label}: {code}")
+                            else: st.write(f"{label}: {code}")
+                    
+                    c1, c2 = st.columns(2)
+                    with c1: show_mini(last['Top'], "Top")
+                    with c2: show_mini(last['Bottom'], "Bot")
+                    if last['Outer'] and last['Outer'] != 'N/A':
+                        show_mini(last['Outer'], "Out")
+    except: pass
+
 # --- TABS ---
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Modo Viaje"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Viaje"])
 
 with tab1:
-    st.header("Sugerencia del Día")
     recs_df, temp_calculada = recommend_outfit(df, weather, code_occ, st.session_state['seed'])
 
-    # Overrides manuales
-    if 'custom_overrides' not in st.session_state: st.session_state['custom_overrides'] = {}
     for cat_key, code_val in st.session_state['custom_overrides'].items():
         if code_val and code_val in df['Code'].values:
             manual_item = df[df['Code'] == code_val].iloc[0]
-            manual_cat = manual_item['Category']
-            if manual_cat in ['Remera', 'Camisa']:
-                recs_df = recs_df[~recs_df['Category'].isin(['Remera', 'Camisa'])]
-            elif manual_cat == 'Pantalón':
-                recs_df = recs_df[recs_df['Category'] != 'Pantalón']
-            elif manual_cat in ['Campera', 'Buzo']:
-                recs_df = recs_df[~recs_df['Category'].isin(['Campera', 'Buzo'])]
+            if manual_item['Category'] in ['Remera', 'Camisa']: recs_df = recs_df[~recs_df['Category'].isin(['Remera', 'Camisa'])]
+            elif manual_item['Category'] == 'Pantalón': recs_df = recs_df[recs_df['Category'] != 'Pantalón']
+            elif manual_item['Category'] in ['Campera', 'Buzo']: recs_df = recs_df[~recs_df['Category'].isin(['Campera', 'Buzo'])]
             recs_df = pd.concat([recs_df, manual_item.to_frame().T], ignore_index=True)
 
     with st.container(border=True):
@@ -308,9 +275,7 @@ with tab1:
     with col_h2: 
         c_btn1, c_btn2 = st.columns(2)
         if c_btn1.button("🔄 Cambiar", use_container_width=True): 
-            st.session_state['change_mode'] = not st.session_state['change_mode']
-            st.session_state['custom_overrides'] = {} 
-            st.rerun()
+            st.session_state['change_mode'] = not st.session_state['change_mode']; st.session_state['custom_overrides'] = {}; st.rerun()
         if c_btn2.button("🛠️ Manual", use_container_width=True):
             st.session_state['show_custom_ui'] = not st.session_state.get('show_custom_ui', False)
 
@@ -319,20 +284,15 @@ with tab1:
             st.markdown("###### ✍️ Ingresá el código:")
             with st.form("custom_outfit_form"):
                 cc1, cc2, cc3 = st.columns(3)
-                val_top = st.session_state['custom_overrides'].get('top', '')
-                val_bot = st.session_state['custom_overrides'].get('bot', '')
-                val_out = st.session_state['custom_overrides'].get('out', '')
-                new_top = cc1.text_input("Torso", value=val_top, placeholder="Code...")
-                new_bot = cc2.text_input("Piernas", value=val_bot, placeholder="Code...")
-                new_out = cc3.text_input("Abrigo", value=val_out, placeholder="Code...")
+                new_top = cc1.text_input("Torso", placeholder="Code...")
+                new_bot = cc2.text_input("Piernas", placeholder="Code...")
+                new_out = cc3.text_input("Abrigo", placeholder="Code...")
                 if st.form_submit_button("Aplicar"):
                     overrides = {}
                     if new_top.strip(): overrides['top'] = new_top.strip().upper()
                     if new_bot.strip(): overrides['bot'] = new_bot.strip().upper()
                     if new_out.strip(): overrides['out'] = new_out.strip().upper()
-                    st.session_state['custom_overrides'] = overrides
-                    st.session_state['show_custom_ui'] = False
-                    st.rerun()
+                    st.session_state['custom_overrides'] = overrides; st.session_state['show_custom_ui'] = False; st.rerun()
 
     rec_top, rec_bot, rec_out = None, None, None
     selected_items_codes = []
@@ -344,7 +304,7 @@ with tab1:
                 item = df_subset.iloc[0] 
                 sna = decodificar_sna(item['Code'])
                 limit = get_limit_for_item(item['Category'], sna)
-                uses = int(item['Uses']) if item['Uses'] != '' else 0
+                uses = int(float(item['Uses'])) if item['Uses'] not in ['', 'nan'] else 0
                 health = max(0.0, min(1.0, (limit - uses) / limit))
                 img_data = cargar_imagen_desde_url(item['ImageURL'])
                 if img_data: st.image(img_data, use_column_width=True)
@@ -354,9 +314,7 @@ with tab1:
                 st.progress(health, text=f"Vida: {uses}/{limit}")
                 if health < 0.25: st.warning("⚠️ Lavar pronto")
                 return item
-            else:
-                st.info("🤷‍♂️ N/A")
-                return None
+            else: st.info("🤷‍♂️ N/A"); return None
 
     if not recs_df.empty:
         c1, c2, c3 = st.columns(3)
@@ -395,15 +353,14 @@ with tab1:
                         idx = df[df['Code'] == item['Code']].index[0]
                         sna = decodificar_sna(item['Code'])
                         limit = get_limit_for_item(item['Category'], sna)
-                        current_uses = int(df.at[idx, 'Uses']) if df.at[idx, 'Uses'] != '' else 0
+                        current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
                         if (current_uses + 1) > limit: alerts.append({'code': item['Code'], 'cat': item['Category'], 'uses': current_uses, 'limit': limit})
                     
-                    if alerts:
-                        st.session_state['alerts_buffer'] = alerts; st.session_state['confirm_stage'] = 1; st.rerun()
+                    if alerts: st.session_state['alerts_buffer'] = alerts; st.session_state['confirm_stage'] = 1; st.rerun()
                     else:
                         for item in selected_items_codes:
                             idx = df[df['Code'] == item['Code']].index[0]
-                            curr = int(df.at[idx, 'Uses']) if df.at[idx, 'Uses'] != '' else 0
+                            curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
                             df.at[idx, 'Uses'] = curr + 1
                         st.session_state['inventory'] = df; save_data_gsheet(df)
                         ra = r_abrigo + 1 if r_abrigo is not None else 3
@@ -420,66 +377,44 @@ with tab1:
                     c_w1, c_w2 = st.columns(2)
                     if c_w1.button("🧼 Lavar", key=f"w_{alert['code']}"):
                         idx = df[df['Code'] == alert['code']].index[0]
-                        df.at[idx, 'Status'] = 'Lavando'
-                        df.at[idx, 'Uses'] = 0
-                        df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
+                        df.at[idx, 'Status'] = 'Lavando'; df.at[idx, 'Uses'] = 0; df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
                         save_data_gsheet(df); st.rerun()
                     if c_w2.button("👟 Usar igual", key=f"k_{alert['code']}"):
                         idx = df[df['Code'] == alert['code']].index[0]
-                        curr = int(df.at[idx, 'Uses']) if df.at[idx, 'Uses'] != '' else 0
+                        curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
                         df.at[idx, 'Uses'] = curr + 1; save_data_gsheet(df); st.session_state['confirm_stage'] = 0; st.session_state['alerts_buffer'] = []; st.rerun()
     else: st.error("No hay ropa limpia disponible.")
 
 with tab2: 
     st.header("Lavadero")
-    st.subheader("🚿 Ingreso Rápido")
     with st.container(border=True):
         col_input, col_btn = st.columns([3, 1])
         with col_input:
             with st.form("quick_wash_form", clear_on_submit=True):
                 code_input = st.text_input("Ingresar Código")
-                submitted = st.form_submit_button("🧼 Lavar", use_container_width=True)
-                if submitted and code_input:
+                if st.form_submit_button("🧼 Lavar", use_container_width=True) and code_input:
                     code_clean = code_input.strip().upper()
                     if code_clean in df['Code'].values:
                         idx = df[df['Code'] == code_clean].index[0]
-                        df.at[idx, 'Status'] = 'Lavando'
-                        df.at[idx, 'Uses'] = 0
-                        df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
-                        st.session_state['inventory'] = df
-                        save_data_gsheet(df)
-                        st.success(f"✅ {code_clean} enviado a lavar.")
-                        st.rerun()
+                        df.at[idx, 'Status'] = 'Lavando'; df.at[idx, 'Uses'] = 0; df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
+                        st.session_state['inventory'] = df; save_data_gsheet(df); st.success(f"✅ {code_clean} lavando."); st.rerun()
                     else: st.error("❌ Código no existe.")
 
-    st.markdown("---")
-    st.subheader("📋 Planilla de Control")
-    edited_laundry = st.data_editor(
-        df[['Code', 'Category', 'Status', 'Uses']], 
-        key="ed_lav", 
-        column_config={"Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True)}, 
-        hide_index=True, 
-        disabled=["Code", "Category", "Uses"], 
-        use_container_width=True
-    )
+    edited_laundry = st.data_editor(df[['Code', 'Category', 'Status', 'Uses']], key="ed_lav", column_config={"Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True)}, hide_index=True, disabled=["Code", "Category", "Uses"], use_container_width=True)
     if st.button("🔄 Actualizar Planilla"):
         df.update(edited_laundry)
         for idx in df.index:
             if df.at[idx, 'Status'] == 'Lavando' and (pd.isna(df.at[idx, 'LaundryStart']) or df.at[idx, 'LaundryStart'] == ''):
-                df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
-                df.at[idx, 'Uses'] = 0
-            elif df.at[idx, 'Status'] == 'Sucio':
-                df.at[idx, 'Uses'] = 0
-                df.at[idx, 'LaundryStart'] = ''
-            elif df.at[idx, 'Status'] == 'Limpio':
-                 df.at[idx, 'LaundryStart'] = ''
-        st.session_state['inventory'] = df; save_data_gsheet(df); st.success("Inventario actualizado en la nube")
+                df.at[idx, 'LaundryStart'] = datetime.now().isoformat(); df.at[idx, 'Uses'] = 0
+            elif df.at[idx, 'Status'] == 'Sucio': df.at[idx, 'Uses'] = 0; df.at[idx, 'LaundryStart'] = ''
+            elif df.at[idx, 'Status'] == 'Limpio': df.at[idx, 'LaundryStart'] = ''
+        st.session_state['inventory'] = df; save_data_gsheet(df); st.success("Actualizado")
 
 with tab3: 
     st.header("Inventario Total")
     edited_inv = st.data_editor(df, num_rows="dynamic", use_container_width=True, column_config={"Uses": st.column_config.ProgressColumn("Desgaste", min_value=0, max_value=10, format="%d"), "ImageURL": st.column_config.LinkColumn("Foto")})
     if st.button("💾 Guardar Inventario Completo"): 
-        st.session_state['inventory'] = edited_inv; save_data_gsheet(edited_inv); st.toast("Guardado en Google Sheets")
+        st.session_state['inventory'] = edited_inv; save_data_gsheet(edited_inv); st.toast("Guardado")
 
 with tab4: 
     st.header("Alta de Prenda")
@@ -513,7 +448,6 @@ with tab5:
     with c_s1:
         st.markdown("##### 🔥 Top 5 Más Usadas")
         if not df.empty:
-            # Convertimos Uses a numerico para ordenar
             df['Uses'] = pd.to_numeric(df['Uses'], errors='coerce').fillna(0)
             top_5 = df.sort_values(by='Uses', ascending=False).head(5)
             st.dataframe(top_5[['Code', 'Category', 'Uses']], hide_index=True, use_container_width=True)
@@ -532,23 +466,18 @@ with tab5:
             fb['Rating_Abrigo'] = pd.to_numeric(fb['Rating_Abrigo'], errors='coerce')
             fb['Rating_Comodidad'] = pd.to_numeric(fb['Rating_Comodidad'], errors='coerce')
             fb['Rating_Seguridad'] = pd.to_numeric(fb['Rating_Seguridad'], errors='coerce')
-            
             fb['Avg_Score'] = (fb['Rating_Abrigo'] + fb['Rating_Comodidad'] + fb['Rating_Seguridad']) / 3
             fb['Day'] = fb['Date'].astype(str).str.slice(0, 10)
             daily_trend = fb.groupby('Day')['Avg_Score'].mean()
             st.line_chart(daily_trend)
-        else: st.info("Falta data de feedback.")
-    except: st.info("Error cargando feedback.")
+    except: st.info("Falta data de feedback.")
 
 with tab6:
     st.header("Modo Viaje")
-    st.info("Selecciona qué te llevas. El sistema recordará si te falta algo.")
-    
+    st.info("Selecciona qué te llevas.")
     if 'travel_pack' not in st.session_state: st.session_state['travel_pack'] = None
-    
     dest_city = st.text_input("Destino", value="Buenos Aires")
     num_days = st.number_input("Días", min_value=1, value=3)
-    
     if st.button("🎒 Armar Valija"):
         packable = df[df['Status'] == 'Limpio']
         tops = packable[packable['Category'].isin(['Remera', 'Camisa'])].sample(min(len(packable), num_days+1))
