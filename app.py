@@ -195,18 +195,30 @@ with tab2:
 with tab3:
     st.subheader("Ingreso de Nuevo Item (SNA)")
     
-    c_temp = st.selectbox("Temporada", ["V", "W", "M"])
-    c_type = st.selectbox("Tipo", ["R (Remera)", "P (Pantalón)", "C (Campera)", "B (Buzo)", "S (Short)"])
-    c_len = st.selectbox("Largo", ["00", "01", "02"])
-    c_occ = st.selectbox("Ocasión", ["U", "D", "C", "F"])
-    c_id = st.text_input("ID Numérico (3 dígitos)", "001")
+    col1, col2 = st.columns(2)
+    with col1:
+        c_temp = st.selectbox("Temporada", ["V", "W", "M"])
+        c_type = st.selectbox("Tipo", ["R (Remera)", "P (Pantalón)", "C (Campera)", "B (Buzo)", "S (Short)"])
+        c_len = st.selectbox("Largo", ["00", "01", "02"])
+    
+    with col2:
+        c_occ = st.selectbox("Ocasión", ["U", "D", "C", "F"])
+        # Aquí agregamos el selector de color según nuestra tabla
+        c_col = st.selectbox("Color", ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10"], 
+                             format_func=lambda x: {
+                                 "01": "Blanco", "02": "Negro", "03": "Rojo", "04": "Azul", 
+                                 "05": "Gris", "06": "Verde", "07": "Am/Nar", 
+                                 "08": "Mar/Beige", "09": "Estampado", "10": "Denim"
+                             }.get(x))
+        c_id = st.text_input("ID Individual (2 dígitos)", "01")
+    
     c_url = st.text_input("URL Foto", "https://via.placeholder.com/150")
     
-    # Generador de Código SNA Automático
     type_map = {"R (Remera)": "R", "P (Pantalón)": "P", "C (Campera)": "C", "B (Buzo)": "B", "S (Short)": "S"}
     cat_map = {"R (Remera)": "Remera", "P (Pantalón)": "Pantalón", "C (Campera)": "Campera", "B (Buzo)": "Buzo", "S (Short)": "Short"}
     
-    generated_code = f"{c_temp}{type_map[c_type]}{c_len}{c_occ}{c_id}"
+    # Lógica de 9 dígitos: [T][Type][Len][Occ][Col][ID]
+    generated_code = f"{c_temp}{type_map[c_type]}{c_len}{c_occ}{c_col}{c_id}"
     st.markdown(f"**Código Generado:** `{generated_code}`")
     
     if st.button("Agregar al Inventario"):
