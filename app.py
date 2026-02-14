@@ -11,7 +11,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v10.3", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v10.4", layout="centered", page_icon="🧥")
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
 def get_google_sheet_client():
@@ -201,7 +201,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v10.3 - Formal + Uni")
+st.sidebar.caption("v10.4 - Estadísticas Full")
 
 # API KEY AUTOMÁTICA
 if "openweathermap" in st.secrets:
@@ -389,6 +389,8 @@ with tab1:
                             idx = df[df['Code'] == item['Code']].index[0]
                             curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
                             df.at[idx, 'Uses'] = curr + 1
+                            df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d") # <--- AQUI SE AGREGO LA FECHA
+
                         st.session_state['inventory'] = df; save_data_gsheet(df)
                         ra = r_abrigo + 1 if r_abrigo is not None else 3
                         rc = r_comodidad + 1 if r_comodidad is not None else 3
@@ -409,7 +411,7 @@ with tab1:
                     if c_w2.button("👟 Usar igual", key=f"k_{alert['code']}"):
                         idx = df[df['Code'] == alert['code']].index[0]
                         curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
-                        df.at[idx, 'Uses'] = curr + 1; save_data_gsheet(df); st.session_state['confirm_stage'] = 0; st.session_state['alerts_buffer'] = []; st.rerun()
+                        df.at[idx, 'Uses'] = curr + 1; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d"); save_data_gsheet(df); st.session_state['confirm_stage'] = 0; st.session_state['alerts_buffer'] = []; st.rerun()
     else: st.error("No hay ropa limpia disponible.")
 
 with tab2: 
@@ -470,37 +472,120 @@ with tab4:
             st.success(f"¡{code} subido a Google Sheets!")
 
 with tab5:
-    st.header("Estadísticas")
-    c_s1, c_s2 = st.columns(2)
-    with c_s1:
-        st.markdown("##### 🔥 Top 5 Más Usadas")
-        if not df.empty:
-            df['Uses'] = pd.to_numeric(df['Uses'], errors='coerce').fillna(0)
-            top_5 = df.sort_values(by='Uses', ascending=False).head(5)
-            st.dataframe(top_5[['Code', 'Category', 'Uses']], hide_index=True, use_container_width=True)
-    with c_s2:
-        st.markdown("##### 🧺 Lavadero")
-        if not df.empty:
-            total = len(df)
-            dirty = len(df[df['Status'].isin(['Sucio', 'Lavando'])])
-            rate = dirty / total if total > 0 else 0
-            st.progress(rate, text=f"Suciedad: {int(rate*100)}%")
+    st.header("📊 Estadísticas Avanzadas")
 
-    st.markdown("##### 📈 Tendencia de Flow")
-    try:
-        fb = load_feedback_gsheet()
-        if not fb.empty:
-            fb['Rating_Abrigo'] = pd.to_numeric(fb['Rating_Abrigo'], errors='coerce')
-            fb['Rating_Comodidad'] = pd.to_numeric(fb['Rating_Comodidad'], errors='coerce')
-            fb['Rating_Seguridad'] = pd.to_numeric(fb['Rating_Seguridad'], errors='coerce')
-            fb['Avg_Score'] = (fb['Rating_Abrigo'] + fb['Rating_Comodidad'] + fb['Rating_Seguridad']) / 3
-            fb['Day'] = fb['Date'].astype(str).str.slice(0, 10)
-            daily_trend = fb.groupby('Day')['Avg_Score'].mean()
-            st.line_chart(daily_trend)
-    except: st.info("Falta data de feedback.")
+    # --- 1. LÓGICA DE LAVADERO DETALLADO ---
+    if not df.empty:
+        total_items = len(df)
+        dirty_items = df[df['Status'].isin(['Sucio', 'Lavando'])]
+        count_dirty = len(dirty_items)
+        count_clean = total_items - count_dirty
+        
+        rate_dirty = count_dirty / total_items if total_items > 0 else 0
+        
+        st.caption("Estado del Lavadero")
+        st.progress(rate_dirty, text=f"Suciedad: {int(rate_dirty*100)}% ({count_clean} Limpias | {count_dirty} Sucias)")
+    
+    st.divider()
+
+    col_stats_1, col_stats_2 = st.columns(2)
+
+    # --- 2. PRENDAS MUERTAS (Cementerio) ---
+    with col_stats_1:
+        st.subheader("👻 Prendas Muertas")
+        st.caption("Limpias y sin uso (>90 días)")
+        
+        def is_dead_stock(row):
+            # Solo analizamos si está limpia
+            if row['Status'] != 'Limpio': 
+                return False
+            
+            # Si no tiene fecha registrada, asumimos que no se usa hace mucho
+            if pd.isna(row['LastWorn']) or str(row['LastWorn']) in ['', 'nan', 'None']:
+                return True
+            
+            # Si tiene fecha, calculamos días
+            try:
+                last_date = datetime.fromisoformat(str(row['LastWorn']))
+                # Si pasaron más de 90 días
+                if (datetime.now() - last_date).days > 90:
+                    return True
+            except:
+                return True # Si falla la fecha, asumimos muerta
+            
+            return False
+
+        dead_df = df[df.apply(is_dead_stock, axis=1)]
+        
+        if not dead_df.empty:
+            st.dataframe(
+                dead_df[['Category', 'Code', 'LastWorn']], 
+                hide_index=True, 
+                use_container_width=True,
+                column_config={
+                    "LastWorn": st.column_config.TextColumn("Último Uso"),
+                    "Code": "Código"
+                }
+            )
+            if st.button("🗑️ Sugerir Donación (Simulado)"):
+                st.toast("Podrías regalar estas prendas.")
+        else:
+            st.success("¡Tu rotación es perfecta! No hay prendas muertas.")
+
+    # --- 3. TENDENCIA DE FLOW (Top Rated) ---
+    with col_stats_2:
+        st.subheader("🔥 Top Flow")
+        st.caption("Tus favoritas según feedback")
+        
+        try:
+            fb = load_feedback_gsheet()
+            if not fb.empty and 'Action' in fb.columns:
+                # Filtramos solo lo que te pusiste (Action = Accepted)
+                accepted = fb[fb['Action'] == 'Accepted'].copy()
+                
+                # Convertimos ratings a números
+                cols_rate = ['Rating_Abrigo', 'Rating_Comodidad', 'Rating_Seguridad']
+                for c in cols_rate:
+                    accepted[c] = pd.to_numeric(accepted[c], errors='coerce').fillna(3)
+                
+                # Calculamos puntaje promedio por registro
+                accepted['Score'] = accepted[cols_rate].mean(axis=1)
+                
+                # "Derretimos" (Unpivot) la tabla para tener una lista larga de códigos
+                melted = accepted.melt(
+                    id_vars=['Score'], 
+                    value_vars=['Top', 'Bottom', 'Outer'], 
+                    value_name='Code'
+                ).dropna()
+                
+                # Filtramos códigos vacíos o N/A
+                melted = melted[~melted['Code'].isin(['N/A', 'nan', ''])]
+                
+                # Agrupamos por Código y calculamos promedio de Score
+                ranking = melted.groupby('Code')['Score'].mean().reset_index()
+                ranking = ranking.sort_values(by='Score', ascending=False).head(5)
+                
+                # Cruzamos con el Inventario para tener la Foto y Categoría
+                ranking = ranking.merge(df[['Code', 'Category', 'ImageURL']], on='Code', how='left')
+                
+                # Mostramos tabla bonita con imágenes
+                st.dataframe(
+                    ranking[['ImageURL', 'Category', 'Score']],
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "ImageURL": st.column_config.ImageColumn("Foto"),
+                        "Score": st.column_config.ProgressColumn("Rating", min_value=1, max_value=5, format="%.1f ⭐"),
+                        "Category": "Prenda"
+                    }
+                )
+            else:
+                st.info("Falta data de feedback para calcular tu Flow.")
+        except Exception as e:
+            st.error(f"Error calculando Flow: {e}")
 
 with tab6:
-    st.header("✈️ Modo Viaje v2.0") # <--- Si ves esto, el código se actualizó
+    st.header("✈️ Modo Viaje v2.0") 
     
     # --- CONFIGURACIÓN DEL VIAJE ---
     col_dest, col_days = st.columns([2, 1])
