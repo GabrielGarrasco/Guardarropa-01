@@ -286,4 +286,71 @@ with tab1:
                         save_feedback_entry(entry)
                         st.toast("¡Outfit registrado con éxito!", icon="🔥")
 
-            # Etapa de Conflicto (Límite Lav
+            # Etapa de Conflicto (Límite Lavado)
+            elif st.session_state['confirm_stage'] == 1:
+                st.error("🚨 Esperá! Hay ropa que pide lavado.")
+                for alert in st.session_state['alerts_buffer']:
+                    with st.container(border=True):
+                        st.write(f"**{alert['cat']} ({alert['code']})**: {alert['uses']} usos (Max {alert['limit']})")
+                        c_w1, c_w2 = st.columns(2)
+                        if c_w1.button("🧼 Lavar", key=f"w_{alert['code']}"):
+                            idx = df[df['Code'] == alert['code']].index[0]
+                            df.at[idx, 'Status'] = 'Sucio'; df.at[idx, 'Uses'] = 0
+                            save_data(df)
+                            st.rerun()
+                        if c_w2.button("👟 Usar igual", key=f"k_{alert['code']}"):
+                            # Forzar uso
+                            idx = df[df['Code'] == alert['code']].index[0]
+                            df.at[idx, 'Uses'] = int(df.at[idx, 'Uses']) + 1
+                            save_data(df)
+                            # Guardar feedback pendiente (asumimos 3 estrellas por defecto si forzaron, o recuperamos session)
+                            st.session_state['confirm_stage'] = 0
+                            st.session_state['alerts_buffer'] = []
+                            st.toast("Guardado forzoso ok.")
+                            st.rerun()
+
+    else:
+        st.error("No hay ropa limpia disponible para este clima.")
+
+# --- TABS DE GESTIÓN (IDÉNTICOS) ---
+with tab2: # Lavadero
+    st.subheader("🧺 Gestión de Lavado")
+    edited_laundry = st.data_editor(df[['Code', 'Category', 'Status', 'Uses']], key="ed_lav", 
+        column_config={"Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True)},
+        hide_index=True, disabled=["Code", "Category", "Uses"], use_container_width=True)
+    if st.button("🔄 Actualizar Lavadero"):
+        df.update(edited_laundry)
+        for idx in df.index:
+            if df.at[idx, 'Status'] in ['Lavando', 'Sucio'] and df.at[idx, 'Status'] != st.session_state['inventory'].at[idx, 'Status']:
+                    df.at[idx, 'Uses'] = 0
+        st.session_state['inventory'] = df; save_data(df); st.success("Actualizado")
+
+with tab3: # Inventario
+    st.subheader("📦 Inventario Total")
+    edited_inv = st.data_editor(df, num_rows="dynamic", use_container_width=True,
+        column_config={"Uses": st.column_config.ProgressColumn("Desgaste", min_value=0, max_value=10, format="%d")})
+    if st.button("💾 Guardar Inventario"):
+        st.session_state['inventory'] = edited_inv; save_data(edited_inv); st.toast("Guardado")
+
+with tab4: # Carga Manual
+    st.subheader("🏷️ Alta de Prenda")
+    with st.container(border=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            temp = st.selectbox("Temporada", ["V (Verano)", "W (Invierno)", "M (Media)"]).split(" ")[0]
+            tipo_f = st.selectbox("Tipo", ["R - Remera", "CS - Camisa", "P - Pantalón", "C - Campera", "B - Buzo"])
+            t_code = {"R - Remera":"R", "CS - Camisa":"CS", "P - Pantalón":"P", "C - Campera":"C", "B - Buzo":"B"}[tipo_f]
+            cat_n = tipo_f.split(" - ")[1]
+            if t_code == "P": attr = st.selectbox("Corte", ["Je (Jean)", "Sh (Short)", "DL (Deportivo)", "DC (Corto)", "Ve (Vestir)"]).split(" ")[0]
+            elif t_code in ["C", "B"]: attr = f"0{st.selectbox('Abrigo', ['1 (Rompevientos)', '2 (Liviana)', '3 (Normal)', '4 (Gruesa)', '5 (Muy Gruesa)']).split(' ')[0]}"
+            else: attr = st.selectbox("Manga", ["00 (Musculosa)", "01 (Corta)", "02 (Larga)"]).split(" ")[0]
+        with c2:
+            occ = st.selectbox("Ocasión", ["U", "D", "C", "F"])
+            col = st.selectbox("Color", ["01-Blanco", "02-Negro", "03-Gris", "04-Azul", "05-Verde", "06-Rojo", "07-Amarillo", "08-Beige", "09-Marron", "10-Denim", "11-Naranja", "12-Violeta", "99-Estampado"])[:2]
+            url = st.text_input("URL Foto")
+        
+        code = f"{temp}{t_code}{attr}{occ}{col}{len([c for c in df['Code'] if str(c).startswith(f'{temp}{t_code}{attr}{occ}{col}')]) + 1:02d}"
+        st.write(f"Code: `{code}`")
+        if st.button("Agregar"):
+            new = pd.DataFrame([{'Code': code, 'Category': cat_n, 'Season': temp, 'Occasion': occ, 'ImageURL': url, 'Status': 'Limpio', 'LastWorn': datetime.now().strftime("%Y-%m-%d"), 'Uses': 0}])
+            df = pd.concat([df, new], ignore_index=True); st.session_state['inventory'] = df; save_data(df); st.success("Agregado")
