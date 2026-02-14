@@ -326,8 +326,7 @@ df = st.session_state['inventory']
 weather = get_weather(api_key, user_city)
 
 # --- TABS ---
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Modo Viaje"]))
-
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Modo Viaje"])
 with tab1:
     # 1. Generamos la recomendación base
     recs_df, temp_calculada = recommend_outfit(df, weather, code_occ, st.session_state['seed'])
