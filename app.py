@@ -283,20 +283,82 @@ weather = get_weather(api_key, user_city)
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas"])
 
 with tab1:
+    # 1. Generamos la recomendación base
     recs_df, temp_calculada = recommend_outfit(df, weather, code_occ, st.session_state['seed'])
 
+    # 2. Lógica de Personalización (Sobrescritura)
+    if 'custom_overrides' not in st.session_state: st.session_state['custom_overrides'] = {}
+    
+    # Si hay overrides, modificamos el recs_df
+    for cat_key, code_val in st.session_state['custom_overrides'].items():
+        if code_val and code_val in df['Code'].values:
+            # Buscamos la fila de la prenda manual
+            manual_item = df[df['Code'] == code_val].iloc[0]
+            manual_cat = manual_item['Category']
+            
+            # Eliminamos de la recomendación lo que choque con la manual
+            # (Ej: Si metes un Jean manual, sacamos el pantalón sugerido)
+            if manual_cat in ['Remera', 'Camisa']:
+                recs_df = recs_df[~recs_df['Category'].isin(['Remera', 'Camisa'])]
+            elif manual_cat == 'Pantalón':
+                recs_df = recs_df[recs_df['Category'] != 'Pantalón']
+            elif manual_cat in ['Campera', 'Buzo']:
+                recs_df = recs_df[~recs_df['Category'].isin(['Campera', 'Buzo'])]
+            
+            # Agregamos la manual
+            recs_df = pd.concat([recs_df, manual_item.to_frame().T], ignore_index=True)
+
+    # 3. Mostrar Métricas del Clima
     with st.container(border=True):
         col_w1, col_w2, col_w3 = st.columns(3)
         col_w1.metric("Clima", f"{weather['temp']}°C", weather['desc'])
         col_w2.metric("Sensación", f"{weather['feels_like']}°C")
         col_w3.metric("Tu Perfil", f"{temp_calculada:.1f}°C", "+3°C adj")
 
-    col_h1, col_h2 = st.columns([3, 1])
+    # 4. Botonera Superior (Cambiar / Personalizar)
+    col_h1, col_h2 = st.columns([2, 2])
     with col_h1: st.subheader("Outfit Recomendado")
+    
     with col_h2: 
-        if st.button("🔄 Cambiar"): 
+        c_btn1, c_btn2 = st.columns(2)
+        # Botón Cambiar (Aleatorio)
+        if c_btn1.button("🔄 Cambiar", use_container_width=True): 
             st.session_state['change_mode'] = not st.session_state['change_mode']
+            # Si cambiamos, limpiamos las personalizaciones para que vuelva a sugerir auto
+            st.session_state['custom_overrides'] = {} 
+            st.rerun()
+            
+        # Botón Personalizar (Toggle menú)
+        if c_btn2.button("🛠️ Personalizar", use_container_width=True):
+            st.session_state['show_custom_ui'] = not st.session_state.get('show_custom_ui', False)
 
+    # 5. Menú Desplegable de Personalización
+    if st.session_state.get('show_custom_ui', False):
+        with st.container(border=True):
+            st.markdown("###### ✍️ Ingresá el código de la prenda que querés forzar:")
+            with st.form("custom_outfit_form"):
+                cc1, cc2, cc3 = st.columns(3)
+                # Inputs (Si ya hay algo guardado, lo mostramos, si no, vacío)
+                val_top = st.session_state['custom_overrides'].get('top', '')
+                val_bot = st.session_state['custom_overrides'].get('bot', '')
+                val_out = st.session_state['custom_overrides'].get('out', '')
+
+                new_top = cc1.text_input("Torso (Remera/Camisa)", value=val_top, placeholder="Ej: VR01C...")
+                new_bot = cc2.text_input("Piernas (Pantalón)", value=val_bot, placeholder="Ej: VPJeC...")
+                new_out = cc3.text_input("Abrigo (Buzo/Campera)", value=val_out, placeholder="Ej: WC03U...")
+                
+                if st.form_submit_button("Aplicar Cambios", use_container_width=True):
+                    # Guardamos en session_state solo si escribieron algo válido
+                    overrides = {}
+                    if new_top.strip(): overrides['top'] = new_top.strip().upper()
+                    if new_bot.strip(): overrides['bot'] = new_bot.strip().upper()
+                    if new_out.strip(): overrides['out'] = new_out.strip().upper()
+                    
+                    st.session_state['custom_overrides'] = overrides
+                    st.session_state['show_custom_ui'] = False # Cerramos el menú al aplicar
+                    st.rerun()
+
+    # 6. Renderizado de Tarjetas (Igual que antes, pero usa el recs_df modificado)
     rec_top, rec_bot, rec_out = None, None, None
     selected_items_codes = []
 
@@ -304,7 +366,8 @@ with tab1:
         with col:
             st.markdown(f"###### {title}")
             if not df_subset.empty:
-                item = df_subset.sample(1, random_state=st.session_state['seed']).iloc[0]
+                # Tomamos el primero (porque si personalizamos, solo hay 1)
+                item = df_subset.iloc[0] 
                 sna = decodificar_sna(item['Code'])
                 limit = get_limit_for_item(item['Category'], sna)
                 uses = int(item['Uses'])
@@ -327,6 +390,7 @@ with tab1:
 
     if not recs_df.empty:
         c1, c2, c3 = st.columns(3)
+        # Filtramos recs_df para cada columna
         rec_top_item = render_card(c1, "Torso", recs_df[recs_df['Category'].isin(['Remera', 'Camisa'])])
         if rec_top_item is not None: rec_top = rec_top_item['Code']; selected_items_codes.append(rec_top_item)
         
@@ -339,6 +403,7 @@ with tab1:
 
         st.divider()
 
+        # ... (El resto del código de feedback se mantiene IGUAL desde aquí hacia abajo) ...
         if st.session_state['change_mode']:
             st.info("¿Qué no te convenció?")
             with st.container(border=True):
@@ -382,6 +447,8 @@ with tab1:
                         ra = r_abrigo + 1 if r_abrigo is not None else 3
                         rc = r_comodidad + 1 if r_comodidad is not None else 3
                         rs = r_seguridad + 1 if r_seguridad is not None else 3
+                        # Limpiamos los overrides al confirmar
+                        st.session_state['custom_overrides'] = {} 
                         entry = {'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada, 'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 'Rating_Abrigo': ra, 'Rating_Comodidad': rc, 'Rating_Seguridad': rs, 'Action': 'Accepted'}
                         save_feedback_entry(entry); st.toast("¡Outfit registrado!"); st.rerun()
 
