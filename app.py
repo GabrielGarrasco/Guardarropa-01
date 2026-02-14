@@ -193,17 +193,47 @@ with tab2:
         st.success("Inventario actualizado.")
 
 with tab3:
-    st.subheader("Ingreso de Nuevo Item (SNA)")
+    st.subheader("Ingreso de Nuevo Item (SNA) con Lógica Dinámica")
     
     col1, col2 = st.columns(2)
     with col1:
         c_temp = st.selectbox("Temporada", ["V", "W", "M"])
-        c_type = st.selectbox("Tipo", ["R (Remera)", "P (Pantalón)", "C (Campera)", "B (Buzo)", "S (Short)"])
-        c_len = st.selectbox("Largo", ["00", "01", "02"])
-    
+        # Agregamos "Camisa" a la lista
+        c_type_label = st.selectbox("Tipo de Prenda", 
+                                    ["R (Remera)", "CS (Camisa)", "P (Pantalón)", "C (Campera)", "B (Buzo)", "S (Short)"])
+        
+        # Mapeo de códigos para la lógica
+        type_code = c_type_label.split(" ")[0]
+        
+        # --- LÓGICA DINÁMICA DE "LARGO / ABRIGO" ---
+        if type_code in ["P"]: # Pantalones
+            largo_opciones = {
+                "Sh": "Short", 
+                "DL": "Deportivo Largo", 
+                "DC": "Deportivo Corto", 
+                "Je": "Jean", 
+                "Ve": "Vestir"
+            }
+            c_len = st.selectbox("Estilo de Pantalón", list(largo_opciones.keys()), 
+                                 format_func=lambda x: f"{x} - {largo_opciones[x]}")
+            
+        elif type_code in ["C", "B"]: # Camperas y Buzos
+            abrigo_opciones = {
+                "01": "1- Rompevientos",
+                "02": "2- Fina",
+                "03": "3- Común",
+                "04": "4- Gruesa",
+                "05": "5- Muy Gruesa"
+            }
+            c_len = st.selectbox("Nivel de Abrigo", list(abrigo_opciones.keys()), 
+                                 format_func=lambda x: abrigo_opciones[x])
+        
+        else: # Remeras, Camisas, Shorts
+            c_len = st.selectbox("Largo/Manga", ["00", "01", "02"], 
+                                 format_func=lambda x: {"00":"Musculosa","01":"Corta","02":"Larga"}.get(x))
+
     with col2:
         c_occ = st.selectbox("Ocasión", ["U", "D", "C", "F"])
-        # Aquí agregamos el selector de color según nuestra tabla
         c_col = st.selectbox("Color", ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10"], 
                              format_func=lambda x: {
                                  "01": "Blanco", "02": "Negro", "03": "Rojo", "04": "Azul", 
@@ -212,25 +242,32 @@ with tab3:
                              }.get(x))
         c_id = st.text_input("ID Individual (2 dígitos)", "01")
     
-    c_url = st.text_input("URL Foto", "https://via.placeholder.com/150")
+    c_url = st.text_input("URL Foto de la prenda")
     
-    type_map = {"R (Remera)": "R", "P (Pantalón)": "P", "C (Campera)": "C", "B (Buzo)": "B", "S (Short)": "S"}
-    cat_map = {"R (Remera)": "Remera", "P (Pantalón)": "Pantalón", "C (Campera)": "Campera", "B (Buzo)": "Buzo", "S (Short)": "Short"}
+    # Diccionario de categorías para la base de datos
+    cat_map = {
+        "R": "Remera", "CS": "Camisa", "P": "Pantalón", 
+        "C": "Campera", "B": "Buzo", "S": "Short"
+    }
     
-    # Lógica de 9 dígitos: [T][Type][Len][Occ][Col][ID]
-    generated_code = f"{c_temp}{type_map[c_type]}{c_len}{c_occ}{c_col}{c_id}"
-    st.markdown(f"**Código Generado:** `{generated_code}`")
+    # Generación del código de 9 dígitos
+    # Nota: Si el largo es 'Sh', 'DL', etc., ocupa 2 espacios igual que '01' o '02'
+    generated_code = f"{c_temp}{type_code}{c_len}{c_occ}{c_col}{c_id}"
+    st.markdown(f"**Código Técnico Generado:** `{generated_code}`")
     
-    if st.button("Agregar al Inventario"):
-        new_row = pd.DataFrame([{
-            'Code': generated_code,
-            'Category': cat_map[c_type],
-            'Season': c_temp,
-            'Occasion': c_occ,
-            'ImageURL': c_url,
-            'Status': 'Limpio',
-            'LastWorn': datetime.now().strftime("%Y-%m-%d")
-        }])
-        df = pd.concat([df, new_row], ignore_index=True)
-        save_data(df)
-        st.success(f"Item {generated_code} agregado correctamente.")
+    if st.button("Confirmar y Guardar en Inventario"):
+        if c_url:
+            new_row = pd.DataFrame([{
+                'Code': generated_code,
+                'Category': cat_map[type_code],
+                'Season': c_temp,
+                'Occasion': c_occ,
+                'ImageURL': c_url,
+                'Status': 'Limpio',
+                'LastWorn': datetime.now().strftime("%Y-%m-%d")
+            }])
+            df = pd.concat([df, new_row], ignore_index=True)
+            save_data(df)
+            st.success(f"Prenda {generated_code} registrada exitosamente.")
+        else:
+            st.error("Por favor, pega el link de la foto antes de guardar.")
