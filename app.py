@@ -5,82 +5,60 @@ import os
 from datetime import datetime
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v8.1", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v8.3", layout="centered", page_icon="🧥")
 
 FILE_INV = 'inventory.csv'
 FILE_FEEDBACK = 'feedback.csv'
 
 # --- LÍMITES DE USO (INGENIERÍA DE CICLO DE VIDA) ---
-# Claves basadas en el atributo SNA o Categoría general
 LIMITES_USO = {
-    # Pantalones (por Atributo)
     "Je": 6, "Ve": 4, "DL": 3, "DC": 2, "Sh": 1,
-    # Tops (por Tipo)
-    "R": 2, "CS": 3, 
-    # Abrigos (por Tipo)
+    "R": 2, "CS": 3,
     "B": 5, "C": 10
 }
 
 # --- FUNCIONES AUXILIARES ---
 def decodificar_sna(codigo):
-    """Parsea el código SNA."""
     try:
         codigo = str(codigo).strip()
         if len(codigo) < 4: return None
-        
         if codigo[1:3] == 'CS':
-            tipo = 'CS'
-            idx_start_attr = 3
+            tipo = 'CS'; idx_start_attr = 3
         else:
-            tipo = codigo[1]
-            idx_start_attr = 2
-            
+            tipo = codigo[1]; idx_start_attr = 2
         attr = codigo[idx_start_attr : idx_start_attr + 2]
-        idx_occ = idx_start_attr + 2
-        
-        if idx_occ < len(codigo):
-            occasion = codigo[idx_occ]
-        else:
-            occasion = "C"
-            
+        idx_occ = codigo[idx_start_attr + 2] if len(codigo) > idx_start_attr + 2 else "C"
         return {"tipo": tipo, "attr": attr, "occasion": occasion}
-    except:
-        return None
+    except: return None
 
 def load_data():
     if not os.path.exists(FILE_INV):
         return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses'])
-    
     df = pd.read_csv(FILE_INV)
     df['Code'] = df['Code'].astype(str)
-    
-    # Migración V8: Asegurar que existe columna Uses
-    if 'Uses' not in df.columns:
-        df['Uses'] = 0
-    
+    if 'Uses' not in df.columns: df['Uses'] = 0
     return df
 
-def save_data(df):
-    df.to_csv(FILE_INV, index=False)
+def save_data(df): df.to_csv(FILE_INV, index=False)
 
 def save_feedback_entry(entry):
     if not os.path.exists(FILE_FEEDBACK):
-        df = pd.DataFrame(columns=['Date', 'City', 'Temp_Real', 'Feels_Like', 'User_Adj_Temp', 'Occasion', 'Top', 'Bottom', 'Outer', 'Rating_Abrigo', 'Rating_Comodidad', 'Rating_Seguridad'])
+        df = pd.DataFrame(columns=['Date', 'City', 'Temp_Real', 'Feels_Like', 'User_Adj_Temp', 'Occasion', 'Top', 'Bottom', 'Outer', 'Rating_Abrigo', 'Rating_Comodidad', 'Rating_Seguridad', 'Action'])
     else:
         df = pd.read_csv(FILE_FEEDBACK)
+        # Migración rápida si falta columna Action
+        if 'Action' not in df.columns: df['Action'] = 'Confirm'
+    
     new_row = pd.DataFrame([entry])
     df = pd.concat([df, new_row], ignore_index=True)
     df.to_csv(FILE_FEEDBACK, index=False)
 
-def get_weather(api_key, city="Mendoza, AR"):
-    if not city: city = "Mendoza, AR"
-    if not api_key:
-        return {"temp": 24, "feels_like": 22, "min": 18, "max": 30, "desc": "Modo Demo (Sin API)"}
+def get_weather(api_key, city):
+    if not api_key: return {"temp": 24, "feels_like": 22, "min": 18, "max": 30, "desc": "Modo Demo"}
     try:
         url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric&lang=es"
         res = requests.get(url).json()
-        if res.get("cod") != 200:
-             return {"temp": 0, "feels_like": 0, "min": 0, "max": 0, "desc": f"Error: {res.get('message')}"}
+        if res.get("cod") != 200: return {"temp": 0, "feels_like": 0, "min": 0, "max": 0, "desc": "Error API"}
         return {
             "temp": res['main']['temp'],
             "feels_like": res['main']['feels_like'],
@@ -88,100 +66,102 @@ def get_weather(api_key, city="Mendoza, AR"):
             "max": res['main']['temp_max'], 
             "desc": res['weather'][0]['description'].capitalize()
         }
-    except:
-        return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error Conexión"}
+    except: return {"temp": 15, "feels_like": 14, "desc": "Error Conexión"}
 
-# --- LÓGICA DE RECOMENDACIÓN ---
-def recommend_outfit(df, weather, occasion):
+# --- LÓGICA DE RECOMENDACIÓN CON SEMILLA ---
+def recommend_outfit(df, weather, occasion, seed):
     clean_df = df[df['Status'] == 'Limpio'].copy()
     if clean_df.empty: return pd.DataFrame(), 0
 
     st_meteo = weather.get('feels_like', weather['temp'])
-    temp_decision = st_meteo + 3 # Tu perfil caluroso
+    temp_decision = st_meteo + 3 
     
     recs = []
-    
     for index, row in clean_df.iterrows():
         sna = decodificar_sna(row['Code'])
         if not sna: continue
         if sna['occasion'] != occasion: continue
 
-        # Reglas de Negocio
+        # Reglas
+        match = False
         if row['Category'] == 'Pantalón':
-            tipo_pan = sna['attr']
-            if temp_decision > 26 and tipo_pan in ['Sh', 'DC']: recs.append(row)
-            elif temp_decision > 20 and tipo_pan in ['Je', 'Ve', 'DL', 'Sh']: recs.append(row)
-            elif temp_decision <= 20 and tipo_pan in ['Je', 'Ve', 'DL']: recs.append(row)
-
+            t = sna['attr']
+            if temp_decision > 26 and t in ['Sh', 'DC']: match = True
+            elif temp_decision > 20 and t in ['Je', 'Ve', 'DL', 'Sh']: match = True
+            elif temp_decision <= 20 and t in ['Je', 'Ve', 'DL']: match = True
         elif row['Category'] in ['Remera', 'Camisa']:
-            manga = sna['attr']
-            if temp_decision > 25 and manga in ['00', '01']: recs.append(row)
-            elif temp_decision < 15 and manga in ['02', '01']: recs.append(row)
-            else: recs.append(row)
-
+            m = sna['attr']
+            if temp_decision > 25 and m in ['00', '01']: match = True
+            elif temp_decision < 15 and m in ['02', '01']: match = True
+            else: match = True
         elif row['Category'] in ['Campera', 'Buzo']:
             try:
-                nivel = int(sna['attr'])
-                if temp_decision < 12 and nivel >= 4: recs.append(row)
-                elif temp_decision < 18 and nivel in [2, 3]: recs.append(row)
-                elif temp_decision < 24 and nivel == 1: recs.append(row)
-            except:
-                continue
+                n = int(sna['attr'])
+                if temp_decision < 12 and n >= 4: match = True
+                elif temp_decision < 18 and n in [2, 3]: match = True
+                elif temp_decision < 24 and n == 1: match = True
+            except: pass
+        
+        if match: recs.append(row)
 
+    # AQUÍ ESTÁ LA MAGIA DE LA ROTACIÓN: Usamos la 'seed' para el sampleo
     return pd.DataFrame(recs), temp_decision
 
 # --- INTERFAZ ---
 st.sidebar.title("GDI: Mendoza Ops")
 st.sidebar.markdown("---")
-api_key = st.sidebar.text_input("🔑 API Key OpenWeather", type="password")
+api_key = st.sidebar.text_input("🔑 API Key", type="password")
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
 code_occ = user_occ[0]
 
-if 'inventory' not in st.session_state:
-    st.session_state['inventory'] = load_data()
+# --- SESSION STATE ---
+if 'inventory' not in st.session_state: st.session_state['inventory'] = load_data()
+if 'seed' not in st.session_state: st.session_state['seed'] = 42 # Semilla inicial
+if 'change_mode' not in st.session_state: st.session_state['change_mode'] = False # Controla la visualización de la encuesta
+if 'confirm_stage' not in st.session_state: st.session_state['confirm_stage'] = 0 
+if 'alerts_buffer' not in st.session_state: st.session_state['alerts_buffer'] = []
+
 df = st.session_state['inventory']
-
-# Inicialización de estado para flujo de confirmación
-if 'confirm_stage' not in st.session_state: st.session_state['confirm_stage'] = 0 # 0: Nada, 1: Validando Limites, 2: Feedback
-if 'alerts_buffer' not in st.session_state: st.session_state['alerts_buffer'] = [] # Para guardar prendas en conflicto
-
 weather = get_weather(api_key, user_city)
 
 tab1, tab2, tab3, tab4 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item"])
 
-# --- TAB 1: SUGERENCIA INTELIGENTE ---
 with tab1:
-    recs_df, temp_calculada = recommend_outfit(df, weather, code_occ)
+    recs_df, temp_calculada = recommend_outfit(df, weather, code_occ, st.session_state['seed'])
 
-    # 1. Header Clima (Estética v7.0)
+    # HEADER CLIMA
     with st.container(border=True):
         col_w1, col_w2, col_w3 = st.columns(3)
         col_w1.metric("Clima", f"{weather['temp']}°C", weather['desc'])
         col_w2.metric("Sensación", f"{weather['feels_like']}°C")
         col_w3.metric("Tu Perfil", f"{temp_calculada:.1f}°C", "+3°C adj")
-        if (weather['max'] - weather['min']) > 15:
-            st.warning("⚠️ ¡Alerta de amplitud térmica! (Zonda/Mendoza). Llevá capas.", icon="🌬️")
 
-    # Selección de prendas
+    # HEADER OUTFIT + BOTÓN CAMBIAR
+    col_h1, col_h2 = st.columns([3, 1])
+    with col_h1:
+        st.subheader("Outfit Recomendado")
+    with col_h2:
+        # Si tocan este botón, activamos el modo cambio
+        if st.button("🔄 Cambiar", help="Ver otra opción"):
+            st.session_state['change_mode'] = not st.session_state['change_mode']
+
+    # VARIABLES PARA SELECCIÓN
     rec_top, rec_bot, rec_out = None, None, None
     selected_items_codes = []
 
     if not recs_df.empty:
-        st.subheader("Outfit Recomendado")
-        c1, c2, c3 = st.columns(3)
-        
+        # LOGICA DE SELECCIÓN CON SEMILLA (Reproducibilidad hasta que se cambie la seed)
         base = recs_df[recs_df['Category'].isin(['Remera', 'Camisa'])]
         legs = recs_df[recs_df['Category'] == 'Pantalón']
         outer = recs_df[recs_df['Category'].isin(['Campera', 'Buzo'])]
 
-        # Cards Visuales
+        c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown("###### Torso")
             if not base.empty:
-                item = base.sample(1).iloc[0]
-                rec_top = item['Code']
-                selected_items_codes.append(item)
+                item = base.sample(1, random_state=st.session_state['seed']).iloc[0]
+                rec_top = item['Code']; selected_items_codes.append(item)
                 st.info(f"**{item['Category']}**\n\nCode: `{item['Code']}`")
                 if pd.notna(item['ImageURL']) and item['ImageURL']: st.image(item['ImageURL'], use_column_width=True)
             else: st.write("🚫 Sin opciones")
@@ -189,9 +169,8 @@ with tab1:
         with c2:
             st.markdown("###### Piernas")
             if not legs.empty:
-                item = legs.sample(1).iloc[0]
-                rec_bot = item['Code']
-                selected_items_codes.append(item)
+                item = legs.sample(1, random_state=st.session_state['seed']).iloc[0]
+                rec_bot = item['Code']; selected_items_codes.append(item)
                 st.success(f"**{item['Category']}**\n\nCode: `{item['Code']}`")
                 if pd.notna(item['ImageURL']) and item['ImageURL']: st.image(item['ImageURL'], use_column_width=True)
             else: st.write("🚫 Sin opciones")
@@ -199,238 +178,112 @@ with tab1:
         with c3:
             st.markdown("###### Abrigo")
             if not outer.empty:
-                item = outer.sample(1).iloc[0]
-                rec_out = item['Code']
-                selected_items_codes.append(item)
+                item = outer.sample(1, random_state=st.session_state['seed']).iloc[0]
+                rec_out = item['Code']; selected_items_codes.append(item)
                 st.warning(f"**{item['Category']}**\n\nCode: `{item['Code']}`")
                 if pd.notna(item['ImageURL']) and item['ImageURL']: st.image(item['ImageURL'], use_column_width=True)
             else:
-                st.write("✅ No necesario")
-                rec_out = "N/A"
+                st.write("✅ No necesario"); rec_out = "N/A"
 
         st.divider()
 
-        # --- LÓGICA DE CICLO DE VIDA (NUEVO V8.0) ---
-        
-        # Etapa 0: Botón de Confirmación
-        if st.session_state['confirm_stage'] == 0:
-            if st.button("✅ Confirmar y Usar Outfit", type="primary", use_container_width=True):
-                # 1. Incrementar Usos
-                alerts = []
-                for item in selected_items_codes:
-                    idx = df[df['Code'] == item['Code']].index[0]
-                    df.at[idx, 'Uses'] = int(df.at[idx, 'Uses']) + 1
-                    df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
+        # --- FLUJO 1: CAMBIAR SUGERENCIA (ENCUESTA DE RECHAZO) ---
+        if st.session_state['change_mode']:
+            st.info("Ayudame a mejorar para la próxima.")
+            with st.container(border=True):
+                st.markdown("##### 📝 ¿Qué aspecto no te convenció?")
+                
+                cf1, cf2, cf3 = st.columns(3)
+                with cf1: st.write("🌡️ Abrigo"); n_abr = st.feedback("stars", key="neg_abr")
+                with cf2: st.write("😌 Comodidad"); n_com = st.feedback("stars", key="neg_com")
+                with cf3: st.write("😎 Estilo"); n_seg = st.feedback("stars", key="neg_seg")
+                
+                chk_dislike = st.checkbox("Simplemente no me gustó (Ignorar estrellas)")
+                
+                if st.button("🎲 Generar Nueva Sugerencia", type="secondary"):
+                    # Guardamos el rechazo (feedback negativo)
+                    ra = n_abr + 1 if n_abr is not None else 3
+                    rc = n_com + 1 if n_com is not None else 3
+                    rs = n_seg + 1 if n_seg is not None else 3
                     
-                    # 2. Chequear Límites
-                    sna = decodificar_sna(item['Code'])
-                    limit = 99 # Default infinito
-                    if sna:
-                        if item['Category'] == 'Pantalón': limit = LIMITES_USO.get(sna['attr'], 3)
-                        elif item['Category'] in ['Remera', 'Camisa']: limit = LIMITES_USO.get(sna['tipo'], 2)
-                        elif item['Category'] in ['Campera', 'Buzo']: limit = LIMITES_USO.get(sna['tipo'], 5)
+                    if chk_dislike:
+                        ra, rc, rs = 1, 1, 1 # Penalización máxima si es dislike puro
+                        
+                    entry = {
+                        'Date': datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada,
+                        'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out,
+                        'Rating_Abrigo': ra, 'Rating_Comodidad': rc, 'Rating_Seguridad': rs,
+                        'Action': 'Rejected' # Marcamos que fue rechazo
+                    }
+                    save_feedback_entry(entry)
                     
-                    if df.at[idx, 'Uses'] >= limit:
-                        alerts.append({'code': item['Code'], 'cat': item['Category'], 'uses': df.at[idx, 'Uses'], 'limit': limit})
-                
-                st.session_state['inventory'] = df
-                save_data(df)
-                
-                if alerts:
-                    st.session_state['alerts_buffer'] = alerts
-                    st.session_state['confirm_stage'] = 1 # Hay conflictos
-                    st.rerun()
-                else:
-                    st.session_state['confirm_stage'] = 2 # Todo OK, pasar a estrellas
+                    # CAMBIAMOS LA SEMILLA Y RESETEAMOS MODOS
+                    st.session_state['seed'] += 1 
+                    st.session_state['change_mode'] = False
+                    st.session_state['confirm_stage'] = 0
                     st.rerun()
 
-        # Etapa 1: Resolución de Conflictos (Límite Excedido)
-        if st.session_state['confirm_stage'] == 1:
-            st.error("🚨 ¡Atención! Algunas prendas alcanzaron su límite de uso.")
-            
-            alerts = st.session_state['alerts_buffer']
-            remaining_alerts = []
-            
-            for alert in alerts:
-                with st.container(border=True):
-                    c_alert1, c_alert2 = st.columns([3, 2])
-                    with c_alert1:
-                        st.markdown(f"**{alert['cat']} ({alert['code']})** tiene **{alert['uses']}** usos. (Límite: {alert['limit']})")
-                    with c_alert2:
-                        col_btn1, col_btn2 = st.columns(2)
-                        if col_btn1.button("🧼 A Lavar", key=f"wash_{alert['code']}"):
-                            # Lógica Lavar
-                            idx = df[df['Code'] == alert['code']].index[0]
-                            df.at[idx, 'Status'] = 'Sucio'
-                            df.at[idx, 'Uses'] = 0
-                            save_data(df)
-                            st.toast(f"{alert['code']} enviado al canasto.", icon="🧺")
-                            # Remover de la lista de alertas visuales en prox rerun
-                            # (Se hace implicitamente al no volver a guardarlo, pero necesitamos limpiar el buffer actual para salir del loop)
-                        
-                        elif col_btn2.button("👌 Usable", key=f"keep_{alert['code']}"):
-                            st.toast("Prenda mantenida. ¡Ojo la próxima!", icon="👀")
-                        
-                        else:
-                            # Si no se tocó botón, mantener en la lista para el próximo frame
-                            remaining_alerts.append(alert)
-            
-            # Si el usuario interactuó (los botones reinician el script), verificamos si quedan alertas
-            if st.button("Continuar a Calificación"):
-                st.session_state['confirm_stage'] = 2
-                st.session_state['alerts_buffer'] = []
-                st.rerun()
-
-        # Etapa 2: Feedback (Estrellas)
-        if st.session_state['confirm_stage'] == 2:
-            st.success("✅ Outfit registrado. ¡Disfrutalo!")
-            
-            st.markdown("### ⭐ Calificalo")
-            c_fb1, c_fb2, c_fb3 = st.columns(3)
-            with c_fb1:
-                st.write("🌡️ Abrigo")
-                r_abrigo = st.feedback("stars", key="fb_abrigo")
-            with c_fb2:
-                st.write("😌 Comodidad")
-                r_comodidad = st.feedback("stars", key="fb_comodidad")
-            with c_fb3:
-                st.write("😎 Estilo")
-                r_seguridad = st.feedback("stars", key="fb_estilo")
-
-            if st.button("Guardar Feedback", type="primary"):
-                ra = r_abrigo + 1 if r_abrigo is not None else 3
-                rc = r_comodidad + 1 if r_comodidad is not None else 3
-                rs = r_seguridad + 1 if r_seguridad is not None else 3
+        # --- FLUJO 2: CONFIRMAR Y USAR ---
+        else: # Solo mostramos esto si NO estamos cambiando
+            if st.session_state['confirm_stage'] == 0:
+                # Estrellas de Feedback Positivo (Siempre visibles)
+                st.markdown("### ⭐ Calificación del Outfit")
+                st.caption("Si te gusta, calificá y dale al botón verde para usar.")
                 
-                entry = {
-                    'Date': datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    'City': user_city,
-                    'Temp_Real': weather['temp'],
-                    'Feels_Like': weather['feels_like'],
-                    'User_Adj_Temp': temp_calculada,
-                    'Occasion': code_occ,
-                    'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out,
-                    'Rating_Abrigo': ra, 'Rating_Comodidad': rc, 'Rating_Seguridad': rs
-                }
-                save_feedback_entry(entry)
-                st.session_state['confirm_stage'] = 0 # Reiniciar ciclo
-                st.toast("Feedback guardado exitosamente!", icon="🎉")
+                c_fb1, c_fb2, c_fb3 = st.columns(3)
+                with c_fb1: st.write("🌡️ Abrigo"); r_abrigo = st.feedback("stars", key="fb_abrigo")
+                with c_fb2: st.write("😌 Comodidad"); r_comodidad = st.feedback("stars", key="fb_comodidad")
+                with c_fb3: st.write("😎 Estilo"); r_seguridad = st.feedback("stars", key="fb_estilo")
+                
+                # Botón Principal
+                if st.button("✅ Registrar Uso y Feedback", type="primary", use_container_width=True):
+                    # 1. Verificar Límites
+                    alerts = []
+                    for item in selected_items_codes:
+                        idx = df[df['Code'] == item['Code']].index[0]
+                        current_uses = int(df.at[idx, 'Uses'])
+                        
+                        # Buscar límite
+                        sna = decodificar_sna(item['Code'])
+                        limit = 99
+                        if sna:
+                            if item['Category'] == 'Pantalón': limit = LIMITES_USO.get(sna['attr'], 3)
+                            elif item['Category'] in ['Remera', 'Camisa']: limit = LIMITES_USO.get(sna['tipo'], 2)
+                            elif item['Category'] in ['Campera', 'Buzo']: limit = LIMITES_USO.get(sna['tipo'], 5)
+                        
+                        # Simulamos +1 para ver si se pasa
+                        if (current_uses + 1) > limit:
+                             alerts.append({'code': item['Code'], 'cat': item['Category'], 'uses': current_uses, 'limit': limit})
 
-    else:
-        st.error("No encontré ropa limpia adecuada.")
+                    if alerts:
+                        st.session_state['alerts_buffer'] = alerts
+                        st.session_state['confirm_stage'] = 1 # Bloqueo por lavado
+                        st.rerun()
+                    else:
+                        # Si no hay alertas, GUARDAMOS TODO
+                        # A. Actualizar Usos
+                        for item in selected_items_codes:
+                            idx = df[df['Code'] == item['Code']].index[0]
+                            df.at[idx, 'Uses'] = int(df.at[idx, 'Uses']) + 1
+                            df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
+                        
+                        st.session_state['inventory'] = df
+                        save_data(df)
 
-# --- TAB 2: LAVADERO ---
-with tab2:
-    st.subheader("🧺 Gestión de Lavado")
-    
-    col_l1, col_l2 = st.columns([2, 1])
-    with col_l1:
-        st.info("Marcá lo que pusiste a lavar.")
-        columnas_lavado = ['Code', 'Category', 'Status', 'Uses']
-        edited_laundry = st.data_editor(
-            df[columnas_lavado], 
-            key="editor_lavadero",
-            column_config={
-                "Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True),
-                "Uses": st.column_config.NumberColumn("Usos Act.", disabled=True)
-            },
-            hide_index=True,
-            disabled=["Code", "Category", "Uses"],
-            use_container_width=True
-        )
-        if st.button("🔄 Actualizar Estados"):
-            df.update(edited_laundry)
-            # Si alguien pone 'Limpio' o 'Lavando', resetear usos?
-            # Por seguridad, si pasa a 'Lavando', Uses -> 0
-            for idx in df.index:
-                if df.at[idx, 'Status'] in ['Lavando', 'Sucio'] and df.at[idx, 'Status'] != st.session_state['inventory'].at[idx, 'Status']:
-                     df.at[idx, 'Uses'] = 0
-            
-            st.session_state['inventory'] = df
-            save_data(df)
-            st.success("¡Estados actualizados!")
-            
-    with col_l2:
-        st.write("---")
-        st.markdown("**Carga Rápida a Lavar**")
-        code_to_wash = st.text_input("Ingresá Código")
-        if st.button("Mandar a Lavar"):
-            mask = df['Code'] == code_to_wash
-            if mask.any():
-                df.loc[mask, 'Status'] = 'Lavando'
-                df.loc[mask, 'Uses'] = 0
-                st.session_state['inventory'] = df
-                save_data(df)
-                st.success(f"{code_to_wash} -> Lavando")
-            else:
-                st.error("Código no encontrado")
+                        # B. Guardar Feedback
+                        ra = r_abrigo + 1 if r_abrigo is not None else 3
+                        rc = r_comodidad + 1 if r_comodidad is not None else 3
+                        rs = r_seguridad + 1 if r_seguridad is not None else 3
+                        
+                        entry = {
+                            'Date': datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada,
+                            'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out,
+                            'Rating_Abrigo': ra, 'Rating_Comodidad': rc, 'Rating_Seguridad': rs,
+                            'Action': 'Accepted'
+                        }
+                        save_feedback_entry(entry)
+                        st.toast("¡Outfit registrado con éxito!", icon="🔥")
 
-# --- TAB 3: INVENTARIO GENERAL ---
-with tab3:
-    st.subheader("📋 Inventario Completo")
-    st.markdown("Monitor de Ciclo de Vida activo.")
-    
-    edited_inventory = st.data_editor(
-        df, 
-        key="editor_inventario", 
-        num_rows="dynamic",
-        column_config={
-             "Uses": st.column_config.ProgressColumn("Desgaste/Uso", min_value=0, max_value=10, format="%d")
-        },
-        use_container_width=True
-    )
-    
-    if st.button("💾 Guardar Cambios Inventario"):
-        st.session_state['inventory'] = edited_inventory
-        save_data(edited_inventory)
-        st.toast("Base de datos actualizada", icon="💾")
-        
-    st.download_button("📥 Backup CSV", df.to_csv(index=False).encode('utf-8'), "gdi_backup.csv")
-
-# --- TAB 4: CARGA MANUAL ---
-with tab4:
-    st.subheader("🏷️ Alta de Prenda (SNA Gen)")
-    with st.container(border=True):
-        col_a, col_b = st.columns(2)
-        with col_a:
-            c_temp = st.selectbox("Temporada", ["V (Verano)", "W (Invierno)", "M (Media)"]).split(" ")[0]
-            c_type_full = st.selectbox("Tipo", ["R - Remera", "CS - Camisa", "P - Pantalón", "C - Campera", "B - Buzo"])
-            type_map = {"R - Remera": "R", "CS - Camisa": "CS", "P - Pantalón": "P", "C - Campera": "C", "B - Buzo": "B"}
-            type_code = type_map[c_type_full]
-            category_name = c_type_full.split(" - ")[1]
-            
-            if type_code == "P": 
-                c_attr = st.selectbox("Corte", ["Je (Jean)", "Sh (Short)", "DL (Deportivo Largo)", "DC (Dep. Corto)", "Ve (Vestir)"]).split(" ")[0]
-            elif type_code in ["C", "B"]: 
-                # AQUÍ ESTÁ EL CAMBIO SOLICITADO
-                c_attr = f"0{st.selectbox('Nivel Abrigo', ['1 (Rompevientos)', '2 (Liviana)', '3 (Normal)', '4 (Gruesa)', '5 (Muy Gruesa)']).split(' ')[0]}"
-            else: 
-                c_attr = st.selectbox("Manga", ["00 (Musculosa)", "01 (Corta)", "02 (Larga)"]).split(" ")[0]
-
-        with col_b:
-            c_occ = st.selectbox("Ocasión Uso", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"]).split(" ")[0]
-            # Lista de 10+ colores preservada
-            colors_list = [
-                "01-Blanco", "02-Negro", "03-Gris", "04-Azul", "05-Verde", 
-                "06-Rojo", "07-Amarillo", "08-Beige", "09-Marron", "10-Denim", 
-                "11-Naranja", "12-Violeta", "99-Estampado"
-            ]
-            c_col = st.selectbox("Color Principal", colors_list)[:2]
-            c_url = st.text_input("URL Foto (Opcional)")
-
-        prefix = f"{c_temp}{type_code}{c_attr}{c_occ}{c_col}"
-        count = len([c for c in df['Code'] if str(c).startswith(prefix)])
-        final_code = f"{prefix}{count + 1:02d}"
-        
-        st.markdown(f"### Código Generado: `{final_code}`")
-        
-        if st.button("Agregar al Guardarropa", type="primary"):
-            new_row = pd.DataFrame([{
-                'Code': final_code, 'Category': category_name, 'Season': c_temp, 
-                'Occasion': c_occ, 'ImageURL': c_url, 'Status': 'Limpio', 
-                'LastWorn': datetime.now().strftime("%Y-%m-%d"), 'Uses': 0
-            }])
-            updated_df = pd.concat([df, new_row], ignore_index=True)
-            st.session_state['inventory'] = updated_df
-            save_data(updated_df)
-            st.success(f"¡Agregado! {final_code}")
+            # Etapa de Conflicto (Límite Lav
