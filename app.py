@@ -4,270 +4,119 @@ import requests
 from datetime import datetime
 import os
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(
-    page_title="GDI: Guardarropa Digital Inteligente",
-    page_icon="🧥",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# --- CONFIGURACIÓN ---
+st.set_page_config(page_title="GDI: Mendoza Ops", layout="wide")
 
-# Estilos CSS para modo oscuro industrial
-st.markdown("""
-    <style>
-    .stApp {
-        background-color: #0e1117;
-        color: #c9d1d9;
-    }
-    .stMetric {
-        background-color: #161b22;
-        padding: 10px;
-        border-radius: 5px;
-        border: 1px solid #30363d;
-    }
-    div[data-testid="stExpander"] {
-        border: 1px solid #30363d;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- GESTIÓN DE DATOS ---
 FILE_INV = 'inventory.csv'
-FILE_FEED = 'feedback.csv'
 
 def load_data():
     if not os.path.exists(FILE_INV):
-        # Crear estructura vacía si no existe
-        df = pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn'])
-        df.to_csv(FILE_INV, index=False)
-        return df
+        return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn'])
     return pd.read_csv(FILE_INV)
 
 def save_data(df):
     df.to_csv(FILE_INV, index=False)
 
-def save_feedback(rating, sensation, temp):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    new_data = pd.DataFrame([[timestamp, rating, sensation, temp]], 
-                            columns=['Timestamp', 'Rating', 'Sensation', 'Temperature'])
-    
-    if not os.path.exists(FILE_FEED):
-        new_data.to_csv(FILE_FEED, index=False)
-    else:
-        new_data.to_csv(FILE_FEED, mode='a', header=False, index=False)
-
-# --- MÓDULO CLIMA (OpenWeatherMap) ---
 def get_weather(api_key):
-    # Coordenadas Mendoza, AR
     lat, lon = -32.8908, -68.8272
     if not api_key:
-        # MOCK DATA para demostración si no hay API Key
-        return {"temp": 24, "min": 12, "max": 28, "desc": "Cielo despejado (Demo)"}
-    
+        return {"temp": 12, "min": 5, "max": 25, "desc": "Modo Demo"}
     try:
         url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={api_key}&units=metric&lang=es"
         res = requests.get(url).json()
-        return {
-            "temp": res['main']['temp'],
-            "min": res['main']['temp_min'],
-            "max": res['main']['temp_max'],
-            "desc": res['weather'][0]['description'].capitalize()
-        }
+        return {"temp": res['main']['temp'], "min": res['main']['temp_min'], "max": res['main']['temp_max'], "desc": res['weather'][0]['description'].capitalize()}
     except:
-        st.error("Error conectando a OpenWeatherMap. Usando datos demo.")
-        return {"temp": 24, "min": 12, "max": 28, "desc": "Error API"}
+        return {"temp": 12, "min": 5, "max": 21, "desc": "Error API"}
 
-# --- LÓGICA DE RECOMENDACIÓN (ENGINEERING LOGIC) ---
+# --- LÓGICA DE ABRIGO E INGENIERÍA ---
 def recommend_outfit(df, weather, occasion):
-    # 1. Filtro base: Solo ropa limpia
     clean_df = df[df['Status'] == 'Limpio'].copy()
-    
-    # 2. Lógica Térmica (Usuario Caluroso)
-    # Ajuste: El usuario siente 3 grados más que la realidad
-    feels_like = weather['temp'] + 3 
-    
-    target_season = []
-    if feels_like > 25:
-        target_season = ['V'] # Verano puro
-    elif feels_like > 18:
-        target_season = ['V', 'M'] # Verano o Media estación
-    else:
-        target_season = ['M', 'W'] # Media o Invierno
-        
-    # Filtrar por temporada y ocasión
-    rec_df = clean_df[
-        (clean_df['Season'].isin(target_season)) & 
-        (clean_df['Occasion'] == occasion)
-    ]
-    
-    return rec_df
+    if clean_df.empty: return pd.DataFrame()
 
-# --- INTERFAZ PRINCIPAL ---
+    temp = weather['temp']
+    
+    # El usuario es caluroso, ajustamos el umbral
+    # Si hace 15°C, para él se siente como 18°C.
+    adj_temp = temp + 3 
 
-st.sidebar.title("🛠️ Panel de Control")
-api_key = st.sidebar.text_input("OpenWeatherMap API Key", type="password")
-user_occasion = st.sidebar.selectbox("Ocasión", ["U", "D", "C", "F"], format_func=lambda x: {"U": "Universidad", "D": "Deporte", "C": "Casa", "F": "Formal"}.get(x))
+    # 1. Filtrar Tops por Nivel de Abrigo (Dígitos 3-4 del código)
+    # C=Campera, B=Buzo. El "largo" ahora es el nivel de abrigo.
+    def filter_tops(row):
+        if row['Category'] not in ['Campera', 'Buzo']: return True
+        level = int(row['Code'][2:4]) # Extrae el nivel 01, 02...
+        if adj_temp < 10: return level >= 4
+        if 10 <= adj_temp < 18: return level in [2, 3]
+        if adj_temp >= 18: return level == 1
+        return False
+
+    rec_df = clean_df[clean_df['Occasion'] == occasion]
+    # Aplicar lógica de abrigo solo a abrigos
+    tops_abrigos = rec_df[rec_df['Category'].isin(['Campera', 'Buzo'])]
+    tops_abrigos = tops_abrigos[tops_abrigos.apply(filter_tops, axis=1)]
+    
+    remeras_camisas = rec_df[rec_df['Category'].isin(['Remera', 'Camisa'])]
+    pantalones = rec_df[rec_df['Category'] == 'Pantalón']
+
+    return pd.concat([remeras_camisas, tops_abrigos, pantalones])
+
+# --- INTERFAZ ---
+st.sidebar.title("🛠️ GDI Control")
+api_key = st.sidebar.text_input("API Key", type="password")
+user_occ = st.sidebar.selectbox("Ocasión", ["U", "D", "C", "F"])
 
 df = load_data()
 weather = get_weather(api_key)
-amplitude = weather['max'] - weather['min']
 
-# TABS
-tab1, tab2, tab3 = st.tabs(["📊 Dashboard & Outfit", "🧺 Gestión de Lavado", "➕ Carga de Items"])
+tab1, tab2, tab3 = st.tabs(["📊 Outfit", "🧺 Lavadero", "➕ Carga"])
 
 with tab1:
-    st.title("GDI: Mendoza Operations Center")
-    
-    # Métricas Clima
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Temperatura Actual", f"{weather['temp']}°C")
-    c2.metric("Amplitud Térmica", f"{amplitude:.1f}°C")
-    c3.metric("Condición", weather['desc'])
-    
-    # Alerta de Capas (Mendoza Logic)
-    if amplitude > 15:
-        c4.warning("⚠️ ALERTA ZONDA/AMPLITUD: Usar sistema de capas (Cebolla).")
-    else:
-        c4.success("✅ Clima estable.")
+    st.title(f"Mendoza: {weather['temp']}°C - {weather['desc']}")
+    if (weather['max'] - weather['min']) > 15:
+        st.warning("⚠️ Amplitud térmica alta detectada.")
 
-    st.markdown("---")
-    st.subheader("💡 Sugerencia del Día")
-
-    recommendations = recommend_outfit(df, weather, user_occasion)
-    
-    if recommendations.empty:
-        st.error("No hay prendas limpias disponibles para este clima/ocasión. ¡A lavar!")
-    else:
-        col_top, col_bot = st.columns(2)
-        
-        # Separar partes de arriba y abajo basado en Código SNA (Tipo)
-        # R=Remera, C=Campera, B=Buzo vs P=Pantalón, S=Short
-        tops = recommendations[recommendations['Category'].isin(['Remera', 'Campera', 'Buzo'])]
-        bottoms = recommendations[recommendations['Category'].isin(['Pantalón', 'Short'])]
-        
-        selected_top = tops.sample(1).iloc[0] if not tops.empty else None
-        selected_bottom = bottoms.sample(1).iloc[0] if not bottoms.empty else None
-        
-        with col_top:
-            if selected_top is not None:
-                st.image(selected_top['ImageURL'], caption=f"Top: {selected_top['Category']} [{selected_top['Code']}]", use_column_width=True)
-                st.code(selected_top['Code'])
-        
-        with col_bot:
-            if selected_bottom is not None:
-                st.image(selected_bottom['ImageURL'], caption=f"Bottom: {selected_bottom['Category']} [{selected_bottom['Code']}]", use_column_width=True)
-                st.code(selected_bottom['Code'])
-
-    # Feedback Loop
-    st.markdown("---")
-    with st.expander("📝 Feedback del Sistema"):
-        with st.form("feedback_form"):
-            stars = st.slider("Calificación del Outfit", 1, 5, 3)
-            sensation = st.select_slider("Sensación Térmica Real", options=["Muy Frío", "Frío", "Perfecto", "Calor", "Muy Caluroso"], value="Perfecto")
-            submitted = st.form_submit_button("Registrar Datos")
-            if submitted:
-                save_feedback(stars, sensation, weather['temp'])
-                st.success("Datos guardados para reentrenamiento futuro.")
+    recs = recommend_outfit(df, weather, user_occ)
+    if not recs.empty:
+        cols = st.columns(3)
+        # Mostrar una remera/camisa, un abrigo (si hace falta) y un pantalón
+        for i, cat in enumerate(['Remera', 'Campera', 'Pantalón']):
+            subset = recs[recs['Category'] == cat]
+            if not subset.empty:
+                item = subset.sample(1).iloc[0]
+                cols[i].image(item['ImageURL'], caption=item['Code'])
 
 with tab2:
-    st.subheader("Gestión de Ciclo de Vida (Lavado)")
-    st.info("Edita el estado directamente en la tabla.")
-    
-    # Data Editor permite editar el CSV visualmente
-    edited_df = st.data_editor(
-        df,
-        column_config={
-            "ImageURL": st.column_config.ImageColumn("Preview"),
-            "Status": st.column_config.SelectboxColumn(
-                "Estado",
-                options=["Limpio", "Sucio", "Lavando", "Para Doblar"],
-                required=True
-            )
-        },
-        hide_index=True,
-        num_rows="dynamic"
-    )
-    
-    if st.button("💾 Guardar Cambios de Estado"):
+    st.subheader("Estado de Prendas")
+    edited_df = st.data_editor(df, hide_index=True)
+    if st.button("Guardar Cambios"):
         save_data(edited_df)
-        st.success("Inventario actualizado.")
+        st.success("Guardado en sesión.")
+    
+    # BOTÓN PARA QUE NO PIERDAS TUS PRENDAS
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Descargar Inventario para GitHub", csv, "inventory.csv", "text/csv")
 
 with tab3:
-    st.subheader("Ingreso de Nuevo Item (SNA) con Lógica Dinámica")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        c_temp = st.selectbox("Temporada", ["V", "W", "M"])
-        # Agregamos "Camisa" a la lista
-        c_type_label = st.selectbox("Tipo de Prenda", 
-                                    ["R (Remera)", "CS (Camisa)", "P (Pantalón)", "C (Campera)", "B (Buzo)", "S (Short)"])
-        
-        # Mapeo de códigos para la lógica
-        type_code = c_type_label.split(" ")[0]
-        
-        # --- LÓGICA DINÁMICA DE "LARGO / ABRIGO" ---
-        if type_code in ["P"]: # Pantalones
-            largo_opciones = {
-                "Sh": "Short", 
-                "DL": "Deportivo Largo", 
-                "DC": "Deportivo Corto", 
-                "Je": "Jean", 
-                "Ve": "Vestir"
-            }
-            c_len = st.selectbox("Estilo de Pantalón", list(largo_opciones.keys()), 
-                                 format_func=lambda x: f"{x} - {largo_opciones[x]}")
-            
-        elif type_code in ["C", "B"]: # Camperas y Buzos
-            abrigo_opciones = {
-                "01": "1- Rompevientos",
-                "02": "2- Fina",
-                "03": "3- Común",
-                "04": "4- Gruesa",
-                "05": "5- Muy Gruesa"
-            }
-            c_len = st.selectbox("Nivel de Abrigo", list(abrigo_opciones.keys()), 
-                                 format_func=lambda x: abrigo_opciones[x])
-        
-        else: # Remeras, Camisas, Shorts
-            c_len = st.selectbox("Largo/Manga", ["00", "01", "02"], 
-                                 format_func=lambda x: {"00":"Musculosa","01":"Corta","02":"Larga"}.get(x))
+    st.subheader("Carga de Items")
+    c_temp = st.selectbox("Temporada", ["V", "W", "M"])
+    c_type_label = st.selectbox("Tipo", ["R (Remera)", "CS (Camisa)", "P (Pantalón)", "C (Campera)", "B (Buzo)"])
+    type_code = c_type_label.split(" ")[0]
 
-    with col2:
-        c_occ = st.selectbox("Ocasión", ["U", "D", "C", "F"])
-        c_col = st.selectbox("Color", ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10"], 
-                             format_func=lambda x: {
-                                 "01": "Blanco", "02": "Negro", "03": "Rojo", "04": "Azul", 
-                                 "05": "Gris", "06": "Verde", "07": "Am/Nar", 
-                                 "08": "Mar/Beige", "09": "Estampado", "10": "Denim"
-                             }.get(x))
-        c_id = st.text_input("ID Individual (2 dígitos)", "01")
+    # Lógica de Largo/Abrigo según pedido
+    if type_code == "P":
+        c_len = st.selectbox("Largo", ["Sh", "DL", "DC", "Je", "Ve"], format_func=lambda x: {"Sh":"Short", "DL":"Dep. Largo", "DC":"Dep. Corto", "Je":"Jean", "Ve":"Vestir"}.get(x))
+    elif type_code in ["C", "B"]:
+        c_len = st.selectbox("Abrigo", ["01", "02", "03", "04", "05"], format_func=lambda x: ["1-Rompevientos", "2-Fina", "3-Común", "4-Gruesa", "5-Muy Gruesa"][int(x)-1])
+    else:
+        c_len = st.selectbox("Manga", ["00", "01", "02"])
+
+    c_col = st.selectbox("Color", ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10"])
+    c_url = st.text_input("URL Foto")
     
-    c_url = st.text_input("URL Foto de la prenda")
+    generated_code = f"{c_temp}{type_code}{c_len}{user_occ}{c_col}01"
+    st.code(f"Código: {generated_code}")
     
-    # Diccionario de categorías para la base de datos
-    cat_map = {
-        "R": "Remera", "CS": "Camisa", "P": "Pantalón", 
-        "C": "Campera", "B": "Buzo", "S": "Short"
-    }
-    
-    # Generación del código de 9 dígitos
-    # Nota: Si el largo es 'Sh', 'DL', etc., ocupa 2 espacios igual que '01' o '02'
-    generated_code = f"{c_temp}{type_code}{c_len}{c_occ}{c_col}{c_id}"
-    st.markdown(f"**Código Técnico Generado:** `{generated_code}`")
-    
-    if st.button("Confirmar y Guardar en Inventario"):
-        if c_url:
-            new_row = pd.DataFrame([{
-                'Code': generated_code,
-                'Category': cat_map[type_code],
-                'Season': c_temp,
-                'Occasion': c_occ,
-                'ImageURL': c_url,
-                'Status': 'Limpio',
-                'LastWorn': datetime.now().strftime("%Y-%m-%d")
-            }])
-            df = pd.concat([df, new_row], ignore_index=True)
-            save_data(df)
-            st.success(f"Prenda {generated_code} registrada exitosamente.")
-        else:
-            st.error("Por favor, pega el link de la foto antes de guardar.")
+    if st.button("Añadir"):
+        new_row = pd.DataFrame([{'Code': generated_code, 'Category': c_type_label.split(" ")[1].strip("()"), 'Season': c_temp, 'Occasion': user_occ, 'ImageURL': c_url, 'Status': 'Limpio', 'LastWorn': '2026-02-13'}])
+        df = pd.concat([df, new_row], ignore_index=True)
+        save_data(df)
+        st.success("Añadido.")
