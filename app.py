@@ -648,12 +648,10 @@ with tab6:
     # --- 1. LÓGICA DE AUTO-RESET (Caducidad del Viaje) ---
     if 'travel_end_date' in st.session_state and st.session_state['travel_end_date']:
         if datetime.now() > st.session_state['travel_end_date']:
-            # Si la fecha actual es mayor a la del fin del viaje, borramos todo
             st.session_state['travel_pack'] = None
             st.session_state['travel_end_date'] = None
-            st.toast("📅 El viaje terminó. Lista reiniciada automáticamente.")
+            st.toast("📅 El viaje terminó. Lista reiniciada.")
 
-    # Inicializar estado si no existe
     if 'travel_pack' not in st.session_state: st.session_state['travel_pack'] = None
 
     # --- 2. INPUTS ---
@@ -663,16 +661,17 @@ with tab6:
         num_days = c_dias.number_input("Duración (Días)", min_value=1, value=3, step=1)
         trip_type = c_motivo.selectbox("Tipo de Misión", ["Ocio/Turismo", "Trabajo/Formal", "Aventura"])
     
-    # --- 3. GENERACIÓN (Botón Principal) ---
+    # --- 3. GENERACIÓN ---
     if st.button("🎒 Generar Loadout", type="primary", use_container_width=True):
-        # A. Inteligencia Climática
+        # A. Clima
         w_dest = get_weather(api_key, dest_city)
-        st.info(f"🌤️ Clima en {dest_city}: {w_dest['desc'].capitalize()} | {w_dest['temp']}°C (Sensación {w_dest['feels_like']}°C)")
+        st.info(f"🌤️ Clima en {dest_city}: {w_dest['desc'].capitalize()} | {w_dest['temp']}°C")
         
         # B. Algoritmo
         qty_tops = num_days + 1
         qty_bots = (num_days // 2) + 1
-        qty_outer = 1 if w_dest['min'] < 20 else 0
+        # MODIFICADO: Ahora lleva abrigo si hace menos de 25 grados (más conservador)
+        qty_outer = 1 if w_dest['min'] < 25 else 0 
         
         packable = df[df['Status'] == 'Limpio'].copy()
         
@@ -681,59 +680,69 @@ with tab6:
         else:
             packable = packable[packable['Occasion'].isin(['C', 'D', 'U'])]
             
-        # Selección Tops
         tops_pool = packable[packable['Category'].isin(['Remera', 'Camisa'])]
         sel_tops = tops_pool.sample(min(len(tops_pool), qty_tops), random_state=st.session_state['seed']) if not tops_pool.empty else pd.DataFrame()
 
-        # Selección Bottoms
         bots_pool = packable[packable['Category'] == 'Pantalón']
         sel_bots = bots_pool.sample(min(len(bots_pool), qty_bots), random_state=st.session_state['seed']) if not bots_pool.empty else pd.DataFrame()
             
-        # Selección Outer
         outer_pool = packable[packable['Category'].isin(['Campera', 'Buzo'])]
         sel_outer = pd.DataFrame()
         if qty_outer > 0 and not outer_pool.empty:
             ideal = outer_pool[outer_pool['Code'].str.contains('C03|C04|B03', na=False)] 
             sel_outer = ideal.sample(1) if not ideal.empty else outer_pool.sample(1)
 
-        # C. GUARDAR EN MEMORIA (ESTO ES NUEVO)
+        # C. Guardado
         st.session_state['travel_pack'] = {
             'tops': sel_tops, 
             'bots': sel_bots, 
             'outer': sel_outer,
             'weather_info': w_dest
         }
-        # Guardamos la fecha de expiración (Hoy + Días de viaje + 1 de margen)
         st.session_state['travel_end_date'] = datetime.now() + timedelta(days=num_days + 1)
+        
+        # Limpieza de checkboxes anteriores para evitar confusión
+        for key in list(st.session_state.keys()):
+            if key.startswith("go_") or key.startswith("ret_"):
+                del st.session_state[key]
         st.rerun()
 
-    # --- 4. VISUALIZACIÓN DE LA LISTA GUARDADA ---
+    # --- 4. VISUALIZACIÓN ---
     if st.session_state['travel_pack'] is not None:
         pack = st.session_state['travel_pack']
         
         st.divider()
         c_tit, c_reset = st.columns([3, 1])
-        c_tit.markdown("### 📋 Lista de Empaque Activa")
+        c_tit.markdown("### 📋 Lista de Control (Ida y Vuelta)")
         
-        # BOTÓN DE RESET MANUAL
         if c_reset.button("🗑️ Borrar Lista"):
             st.session_state['travel_pack'] = None
             st.session_state['travel_end_date'] = None
+            # Limpiamos los estados de los checkboxes también
+            for key in list(st.session_state.keys()):
+                if key.startswith("go_") or key.startswith("ret_"):
+                    del st.session_state[key]
             st.rerun()
 
         st.caption(f"Clima previsto: {pack['weather_info']['desc']} ({pack['weather_info']['temp']}°C)")
         
+        # --- FUNCIÓN RENDERIZADO MEJORADA ---
         def render_pack_row(items, label):
             if items.empty: return
             st.markdown(f"**{label} ({len(items)})**")
-            # Usamos st.columns dinámico pero controlando que no explote si son muchos items
             cols = st.columns(len(items)) if len(items) > 0 else []
+            
             for idx, (_, item) in enumerate(items.iterrows()):
                 with cols[idx]:
                     img = cargar_imagen_desde_url(item['ImageURL'])
                     if img: st.image(img, use_column_width=True)
                     st.caption(f"{item['Category']}")
-                    st.checkbox(f"Listo", key=f"pack_{item['Code']}")
+                    
+                    # AQUÍ ESTÁ LA MAGIA: DOS CHECKBOXES
+                    c_ida, c_vuelta = st.columns(2)
+                    c_ida.checkbox("🛫", key=f"go_{item['Code']}", help="Tildar al salir de casa")
+                    c_vuelta.checkbox("🏠", key=f"ret_{item['Code']}", help="Tildar al volver del viaje")
+        # -------------------------------------
 
         render_pack_row(pack['tops'], "👕 Tops")
         render_pack_row(pack['bots'], "👖 Bottoms")
