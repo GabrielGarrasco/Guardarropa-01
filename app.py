@@ -8,15 +8,11 @@ from datetime import datetime
 st.set_page_config(page_title="GDI: Mendoza Ops", layout="wide", page_icon="🧥")
 
 FILE_INV = 'inventory.csv'
+FILE_FEEDBACK = 'feedback.csv'
 
 # --- FUNCIONES AUXILIARES SNA (INGENIERÍA) ---
 def decodificar_sna(codigo):
-    """
-    Parsea el código SNA manejando la longitud variable de 'CS' vs 'R'.
-    """
     try:
-        season = codigo[0]
-        # Detectar si es Camisa (CS) o el resto (1 letra)
         if len(codigo) > 2 and codigo[1:3] == 'CS':
             tipo = 'CS'
             idx_start_attr = 3
@@ -42,6 +38,17 @@ def load_data():
 def save_data(df):
     df.to_csv(FILE_INV, index=False)
 
+def save_feedback_entry(entry):
+    """Guarda la calificación del usuario para entrenar el sistema a futuro"""
+    if not os.path.exists(FILE_FEEDBACK):
+        df = pd.DataFrame(columns=['Date', 'Temp', 'Occasion', 'Top', 'Bottom', 'Outer', 'Rating_Abrigo', 'Rating_Comodidad', 'Rating_Seguridad'])
+    else:
+        df = pd.read_csv(FILE_FEEDBACK)
+    
+    new_row = pd.DataFrame([entry])
+    df = pd.concat([df, new_row], ignore_index=True)
+    df.to_csv(FILE_FEEDBACK, index=False)
+
 def get_weather(api_key):
     lat, lon = -32.8908, -68.8272 
     if not api_key:
@@ -57,7 +64,6 @@ def get_weather(api_key):
             "desc": res['weather'][0]['description'].capitalize()
         }
     except:
-        st.error("Error de conexión con OpenWeather.")
         return {"temp": 15, "min": 10, "max": 20, "desc": "Error API"}
 
 # --- LÓGICA DE RECOMENDACIÓN TÉRMICA ---
@@ -73,10 +79,9 @@ def recommend_outfit(df, weather, occasion):
     for index, row in clean_df.iterrows():
         sna = decodificar_sna(row['Code'])
         if not sna: continue
-        
         if sna['occasion'] != occasion: continue
 
-        # Lógica térmica simplificada para brevedad
+        # Lógica térmica
         if row['Category'] == 'Pantalón':
             tipo_pan = sna['attr']
             if temp_percibida > 26 and tipo_pan in ['Sh', 'DC']: recs.append(row)
@@ -103,26 +108,26 @@ api_key = st.sidebar.text_input("API Key (OpenWeather)", type="password")
 user_occ = st.sidebar.selectbox("Ocasión Actual", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
 code_occ = user_occ[0]
 
-# Cargar datos en Session State
 if 'inventory' not in st.session_state:
     st.session_state['inventory'] = load_data()
 df = st.session_state['inventory']
 
 weather = get_weather(api_key)
 
-# AHORA SON 4 PESTAÑAS
 tab1, tab2, tab3, tab4 = st.tabs(["🔥 Sugerencia", "🧺 Lavadero", "📋 Inventario General", "➕ Carga Manual"])
 
-# --- TAB 1: SUGERENCIA ---
+# --- TAB 1: SUGERENCIA + FEEDBACK ---
 with tab1:
     st.markdown(f"### 🌡️ Clima: {weather['temp']}°C (Sensación: {weather['temp']+3}°C)")
     st.caption(f"Condición: {weather['desc']}")
     
-    if (weather['max'] - weather['min']) > 15:
-        st.warning("⚠️ Alerta Zonda/Amplitud! Usá capas.")
-
     recs_df = recommend_outfit(df, weather, code_occ)
     
+    # Variables para guardar qué se recomendó
+    rec_top = None
+    rec_bot = None
+    rec_out = None
+
     if not recs_df.empty:
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -130,6 +135,7 @@ with tab1:
             base = recs_df[recs_df['Category'].isin(['Remera', 'Camisa'])]
             if not base.empty:
                 item = base.sample(1).iloc[0]
+                rec_top = item['Code'] # Guardamos el código
                 st.info(f"{item['Category']} ({item['Code']})")
                 if pd.notna(item['ImageURL']) and item['ImageURL']: st.image(item['ImageURL'])
         with col2:
@@ -137,6 +143,7 @@ with tab1:
             legs = recs_df[recs_df['Category'] == 'Pantalón']
             if not legs.empty:
                 item = legs.sample(1).iloc[0]
+                rec_bot = item['Code']
                 st.success(f"{item['Category']} ({item['Code']})")
                 if pd.notna(item['ImageURL']) and item['ImageURL']: st.image(item['ImageURL'])
         with col3:
@@ -144,102 +151,101 @@ with tab1:
             outer = recs_df[recs_df['Category'].isin(['Campera', 'Buzo'])]
             if not outer.empty:
                 item = outer.sample(1).iloc[0]
+                rec_out = item['Code']
                 st.warning(f"{item['Category']} ({item['Code']})")
                 if pd.notna(item['ImageURL']) and item['ImageURL']: st.image(item['ImageURL'])
             else:
+                rec_out = "N/A"
                 st.write("No necesitás abrigo.")
+        
+        # --- SECCIÓN DE FEEDBACK ---
+        st.divider()
+        st.subheader("⭐ Calificalo para que aprenda")
+        with st.form("feedback_form"):
+            st.write("¿Qué tal funcionó esta combinación?")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                r_abrigo = st.slider("🌡️ Nivel de Abrigo", 1, 5, 3, help="1: Me congelé/Asé - 5: Temperatura perfecta")
+            with c2:
+                r_comodidad = st.slider("😌 Nivel de Comodidad", 1, 5, 3)
+            with c3:
+                r_seguridad = st.slider("😎 Flow / Seguridad", 1, 5, 3)
+            
+            submit_feedback = st.form_submit_button("Guardar Calificación")
+            
+            if submit_feedback:
+                entry = {
+                    'Date': datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    'Temp': weather['temp'],
+                    'Occasion': code_occ,
+                    'Top': rec_top,
+                    'Bottom': rec_bot,
+                    'Outer': rec_out,
+                    'Rating_Abrigo': r_abrigo,
+                    'Rating_Comodidad': r_comodidad,
+                    'Rating_Seguridad': r_seguridad
+                }
+                save_feedback_entry(entry)
+                st.success("✅ ¡Datos guardados! El algoritmo será más inteligente mañana.")
+
     else:
         st.error("No hay ropa limpia para este clima.")
 
-# --- TAB 2: LAVADERO (Solo Status) ---
+# --- TAB 2: LAVADERO ---
 with tab2:
     st.subheader("Operaciones de Lavado")
-    st.info("Aquí solo cambiamos el estado de las prendas (Limpio ↔ Sucio).")
-    
-    # Mostramos solo columnas relevantes para el lavado
     columnas_lavado = ['Code', 'Category', 'Status', 'LastWorn']
-    
     edited_laundry = st.data_editor(
         df[columnas_lavado], 
         key="editor_lavadero",
-        column_config={
-            "Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True)
-        },
+        column_config={"Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True)},
         hide_index=True,
-        disabled=["Code", "Category", "LastWorn"] # Bloqueamos edición de lo que no sea status
+        disabled=["Code", "Category", "LastWorn"]
     )
-    
     if st.button("Guardar Estados de Lavado"):
-        # Actualizamos el DF principal con los cambios de estado
         df.update(edited_laundry)
         st.session_state['inventory'] = df
         save_data(df)
         st.success("¡Canasto de ropa actualizado!")
 
-# --- TAB 3: INVENTARIO GENERAL (Edición total + Borrar) ---
+# --- TAB 3: INVENTARIO GENERAL ---
 with tab3:
     st.subheader("Gestión de Inventario (Admin)")
-    st.warning("⚠️ Seleccioná la casilla a la izquierda de la fila y presioná 'Supr' (Delete) en tu teclado para borrar una prenda.")
-    
-    # num_rows="dynamic" PERMITE AGREGAR Y BORRAR FILAS
-    edited_inventory = st.data_editor(
-        df, 
-        key="editor_inventario",
-        num_rows="dynamic", # ¡ESTA ES LA CLAVE PARA BORRAR!
-        hide_index=False
-    )
-    
-    col_d1, col_d2 = st.columns([1, 4])
-    with col_d1:
-        if st.button("💾 Guardar Cambios en Inventario"):
-            st.session_state['inventory'] = edited_inventory
-            save_data(edited_inventory)
-            st.success("Inventario guardado.")
-    with col_d2:
-        st.download_button("📥 Descargar CSV de Respaldo", df.to_csv(index=False).encode('utf-8'), "gdi_backup.csv")
+    edited_inventory = st.data_editor(df, key="editor_inventario", num_rows="dynamic", hide_index=False)
+    if st.button("💾 Guardar Cambios"):
+        st.session_state['inventory'] = edited_inventory
+        save_data(edited_inventory)
+        st.success("Inventario guardado.")
+    st.download_button("📥 Descargar CSV", df.to_csv(index=False).encode('utf-8'), "gdi_backup.csv")
 
 # --- TAB 4: CARGA MANUAL ---
 with tab4:
-    st.subheader("Alta de Nueva Prenda (SNA)")
+    st.subheader("Alta de Nueva Prenda")
     col_a, col_b = st.columns(2)
     with col_a:
         c_temp = st.selectbox("Temporada", ["V", "W", "M"])
         c_type_full = st.selectbox("Tipo", ["R - Remera", "CS - Camisa", "P - Pantalón", "C - Campera", "B - Buzo"])
-        
         type_map = {"R - Remera": "R", "CS - Camisa": "CS", "P - Pantalón": "P", "C - Campera": "C", "B - Buzo": "B"}
         type_code = type_map[c_type_full]
         category_name = c_type_full.split(" - ")[1]
-
-        if type_code == "P":
-            c_attr = st.selectbox("Tipo Pantalón", ["Je", "Sh", "DL", "DC", "Ve"])
-        elif type_code in ["C", "B"]:
-            c_attr_raw = st.selectbox("Nivel Abrigo", ["1 - Rompevientos", "2 - Fina", "3 - Común", "4 - Gruesa", "5 - Muy Gruesa"])
-            c_attr = f"0{c_attr_raw[0]}"
-        else: 
-            c_attr_raw = st.selectbox("Manga", ["00 - Musculosa", "01 - Corta", "02 - Larga"])
-            c_attr = c_attr_raw[:2]
+        
+        if type_code == "P": c_attr = st.selectbox("Tipo", ["Je", "Sh", "DL", "DC", "Ve"])
+        elif type_code in ["C", "B"]: c_attr = f"0{st.selectbox('Abrigo', ['1', '2', '3', '4', '5'])}"
+        else: c_attr = st.selectbox("Manga", ["00", "01", "02"])[:2]
 
     with col_b:
-        c_occ_full = st.selectbox("Ocasión", ["U - Universidad", "D - Deporte", "C - Casa", "F - Formal"])
-        c_occ = c_occ_full[0]
-        c_col_full = st.selectbox("Color", ["01-Blanco", "02-Negro", "03-Rojo", "04-Azul", "05-Gris", "06-Verde", "07-Amarillo", "08-Marrón", "09-Estampado", "10-Denim"])
-        c_col = c_col_full[:2]
-        c_url = st.text_input("URL de la Foto (Opcional)")
+        c_occ = st.selectbox("Ocasión", ["U", "D", "C", "F"])
+        c_col = st.selectbox("Color", ["01-Blanco", "02-Negro", "03-Rojo", "04-Azul", "10-Denim"])[:2]
+        c_url = st.text_input("URL Foto")
 
     prefix = f"{c_temp}{type_code}{c_attr}{c_occ}{c_col}"
-    # Contar existentes para ID
     count = len([c for c in df['Code'] if str(c).startswith(prefix)])
-    new_id = f"{count + 1:02d}"
-    final_code = f"{prefix}{new_id}"
+    final_code = f"{prefix}{count + 1:02d}"
     
-    st.code(f"Código Generado: {final_code}")
-    
-    if st.button("Agregar al Armario"):
-        new_row = pd.DataFrame([{
-            'Code': final_code, 'Category': category_name, 'Season': c_temp, 'Occasion': c_occ, 
-            'ImageURL': c_url, 'Status': 'Limpio', 'LastWorn': datetime.now().strftime("%Y-%m-%d")
-        }])
+    st.code(f"Código: {final_code}")
+    if st.button("Agregar"):
+        new_row = pd.DataFrame([{'Code': final_code, 'Category': category_name, 'Season': c_temp, 'Occasion': c_occ, 'ImageURL': c_url, 'Status': 'Limpio', 'LastWorn': datetime.now().strftime("%Y-%m-%d")}])
         updated_df = pd.concat([df, new_row], ignore_index=True)
         st.session_state['inventory'] = updated_df
         save_data(updated_df)
-        st.success(f"Prenda {final_code} guardada.")
+        st.success(f"Guardado: {final_code}")
