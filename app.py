@@ -269,14 +269,15 @@ if 'seed' not in st.session_state: st.session_state['seed'] = 42
 if 'change_mode' not in st.session_state: st.session_state['change_mode'] = False
 if 'confirm_stage' not in st.session_state: st.session_state['confirm_stage'] = 0 
 if 'alerts_buffer' not in st.session_state: st.session_state['alerts_buffer'] = []
-# ... (Código anterior de la sidebar: API Key, Ciudad, Ocasión) ...
+# ... (Tus líneas anteriores 263-271 quedan IGUAL, NO LAS TOQUES) ...
+# 263: user_city = st.sidebar.text_input...
+# 264: user_occ = st.sidebar.selectbox...
+# ...
+# 271: if 'alerts_buffer' not in st.session_state...
 
-user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
-user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
-code_occ = user_occ[0]
+# --- PEGAR DESDE AQUÍ EN LA LÍNEA 272 ---
 
-# --- BLOQUE NUEVO: VISOR DE OUTFIT ACTUAL ---
-# Esto busca la última vez que le diste "Registrar Uso" (Accepted)
+# BLOQUE NUEVO: VISOR DE OUTFIT ACTUAL
 if os.path.exists(FILE_FEEDBACK):
     try:
         fb_data = pd.read_csv(FILE_FEEDBACK)
@@ -294,25 +295,27 @@ if os.path.exists(FILE_FEEDBACK):
                 def mostrar_mini_item(code, label):
                     if pd.isna(code) or code == "N/A" or not code: return
                     # Buscamos la info en el inventario global
-                    item_row = st.session_state['inventory'][st.session_state['inventory']['Code'] == code]
-                    if not item_row.empty:
-                        it = item_row.iloc[0]
-                        st.markdown(f"**{label}**: {it['Category']}")
-                        
-                        img = cargar_imagen_desde_url(it['ImageURL'])
-                        if img: st.image(img, use_column_width=True)
-                    else:
-                        st.text(f"{label}: {code}")
+                    # Asegúrate de que 'inventory' ya esté inicializado (lo está en la línea 267)
+                    if 'inventory' in st.session_state:
+                         item_row = st.session_state['inventory'][st.session_state['inventory']['Code'] == code]
+                         if not item_row.empty:
+                             it = item_row.iloc[0]
+                             st.markdown(f"**{label}**: {it['Category']}")
+                             
+                             img = cargar_imagen_desde_url(it['ImageURL'])
+                             if img: st.image(img, use_column_width=True)
+                         else:
+                             st.text(f"{label}: {code}")
 
                 mostrar_mini_item(last_outfit['Top'], "👕 Torso")
                 mostrar_mini_item(last_outfit['Bottom'], "👖 Piernas")
                 mostrar_mini_item(last_outfit['Outer'], "🧥 Abrigo")
     except:
         pass
-# --- FIN BLOQUE NUEVO ---
 
-if 'inventory' not in st.session_state: st.session_state['inventory'] = load_data()
-# ... (El código sigue igual hacia abajo) ...
+# --- FIN DEL BLOQUE NUEVO ---
+
+# 273: df_checked, updated = check_laundry_timers... (ESTO SIGUE IGUAL)
 df_checked, updated = check_laundry_timers(st.session_state['inventory'])
 if updated:
     st.session_state['inventory'] = df_checked
