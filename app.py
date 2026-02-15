@@ -11,7 +11,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v11.1", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v11.2", layout="centered", page_icon="🧥")
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
 def get_google_sheet_client():
@@ -220,7 +220,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v11.1 - Feedback Detallado")
+st.sidebar.caption("v11.2 - Escala Térmica pH")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -380,42 +380,59 @@ with tab1:
             if st.session_state['confirm_stage'] == 0:
                 st.markdown("### ⭐ Calificación del día")
                 
-                # --- CALIFICACIÓN GLOBAL ---
-                st.caption("Puntuación General del Outfit")
+                # --- HELPER VISUAL: GRADIENTE ---
+                def show_gradient_bar():
+                    st.markdown('<div style="background: linear-gradient(90deg, #3b82f6 0%, #ffffff 50%, #ef4444 100%); height: 8px; border-radius: 4px; margin-bottom: 5px; opacity: 0.8;"></div>', unsafe_allow_html=True)
+
+                # --- GLOBAL ---
+                st.caption("Outfit Completo")
                 c_fb1, c_fb2, c_fb3 = st.columns(3)
-                with c_fb1: st.markdown("**🌡️ Abrigo**"); r_abrigo = st.feedback("stars", key="fb_abrigo")
+                with c_fb1: 
+                    st.markdown("**🌡️ Abrigo (1-7)**")
+                    show_gradient_bar()
+                    # Slider Global (1=Frio, 4=Bien, 7=Calor)
+                    r_abrigo = st.select_slider("Global Abrigo", options=[1, 2, 3, 4, 5, 6, 7], value=4, label_visibility="collapsed", key="fb_abrigo")
                 with c_fb2: st.markdown("**☁️ Comodidad**"); r_comodidad = st.feedback("stars", key="fb_comodidad")
                 with c_fb3: st.markdown("**⚡ Flow**"); r_seguridad = st.feedback("stars", key="fb_estilo")
 
                 st.divider()
-                st.markdown("### 🧥 Calificación por Prenda")
+                st.markdown("### 🧥 Detalle por Prenda")
                 
-                # --- CALIFICACIÓN INDIVIDUAL: TOP ---
-                rt_abr, rt_com, rt_flow = None, None, None
+                # --- TOP ---
+                rt_abr, rt_com, rt_flow = 4, None, None # Default 4 (Perfecto)
                 if rec_top and rec_top != "N/A":
                     st.markdown(f"**Top:** `{rec_top}`")
                     c_t1, c_t2, c_t3 = st.columns(3)
-                    with c_t1: rt_abr = st.feedback("stars", key="star_top_abr")
-                    with c_t2: rt_com = st.feedback("stars", key="star_top_com")
-                    with c_t3: rt_flow = st.feedback("stars", key="star_top_flow")
+                    with c_t1: 
+                        st.caption("Abrigo (pH)")
+                        show_gradient_bar()
+                        rt_abr = st.select_slider("Top Abrigo", options=[1, 2, 3, 4, 5, 6, 7], value=4, label_visibility="collapsed", key="s_top_a")
+                    with c_t2: st.caption("Comodidad"); rt_com = st.feedback("stars", key="s_top_c")
+                    with c_t3: st.caption("Flow"); rt_flow = st.feedback("stars", key="s_top_f")
 
-                # --- CALIFICACIÓN INDIVIDUAL: BOTTOM ---
-                rb_abr, rb_com, rb_flow = None, None, None
+                # --- BOTTOM ---
+                rb_abr, rb_com, rb_flow = 4, None, None
                 if rec_bot and rec_bot != "N/A":
                     st.markdown(f"**Bottom:** `{rec_bot}`")
                     c_b1, c_b2, c_b3 = st.columns(3)
-                    with c_b1: rb_abr = st.feedback("stars", key="star_bot_abr")
-                    with c_b2: rb_com = st.feedback("stars", key="star_bot_com")
-                    with c_b3: rb_flow = st.feedback("stars", key="star_bot_flow")
+                    with c_b1: 
+                        st.caption("Abrigo (pH)")
+                        show_gradient_bar()
+                        rb_abr = st.select_slider("Bot Abrigo", options=[1, 2, 3, 4, 5, 6, 7], value=4, label_visibility="collapsed", key="s_bot_a")
+                    with c_b2: st.caption("Comodidad"); rb_com = st.feedback("stars", key="s_bot_c")
+                    with c_b3: st.caption("Flow"); rb_flow = st.feedback("stars", key="s_bot_f")
                 
-                # --- CALIFICACIÓN INDIVIDUAL: OUTER ---
-                ro_abr, ro_com, ro_flow = None, None, None
+                # --- OUTER ---
+                ro_abr, ro_com, ro_flow = 4, None, None
                 if rec_out and rec_out != "N/A":
                     st.markdown(f"**Outer:** `{rec_out}`")
                     c_o1, c_o2, c_o3 = st.columns(3)
-                    with c_o1: ro_abr = st.feedback("stars", key="star_out_abr")
-                    with c_o2: ro_com = st.feedback("stars", key="star_out_com")
-                    with c_o3: ro_flow = st.feedback("stars", key="star_out_flow")
+                    with c_o1: 
+                        st.caption("Abrigo (pH)")
+                        show_gradient_bar()
+                        ro_abr = st.select_slider("Out Abrigo", options=[1, 2, 3, 4, 5, 6, 7], value=4, label_visibility="collapsed", key="s_out_a")
+                    with c_o2: st.caption("Comodidad"); ro_com = st.feedback("stars", key="s_out_c")
+                    with c_o3: st.caption("Flow"); ro_flow = st.feedback("stars", key="s_out_f")
 
                 st.divider()
 
@@ -438,22 +455,24 @@ with tab1:
 
                         st.session_state['inventory'] = df; save_data_gsheet(df)
                         
-                        # Process Ratings (Default to 3 if None)
-                        ra = r_abrigo + 1 if r_abrigo is not None else 3
+                        # --- PROCESAMIENTO DE VALORES ---
+                        # Abrigo: Es directo del slider (1-7), no sumar nada.
+                        # Estrellas: Devuelven indice (0-4), sumar +1.
+                        
+                        ra = r_abrigo # Directo slider
                         rc = r_comodidad + 1 if r_comodidad is not None else 3
                         rs = r_seguridad + 1 if r_seguridad is not None else 3
                         
-                        # Process Individual Ratings
-                        # Top
-                        v_rt_a = rt_abr + 1 if rt_abr is not None else 3
+                        # Individuales
+                        v_rt_a = rt_abr # Directo slider
                         v_rt_c = rt_com + 1 if rt_com is not None else 3
                         v_rt_f = rt_flow + 1 if rt_flow is not None else 3
-                        # Bot
-                        v_rb_a = rb_abr + 1 if rb_abr is not None else 3
+                        
+                        v_rb_a = rb_abr # Directo slider
                         v_rb_c = rb_com + 1 if rb_com is not None else 3
                         v_rb_f = rb_flow + 1 if rb_flow is not None else 3
-                        # Out
-                        v_ro_a = ro_abr + 1 if ro_abr is not None else 3
+                        
+                        v_ro_a = ro_abr # Directo slider
                         v_ro_c = ro_com + 1 if ro_com is not None else 3
                         v_ro_f = ro_flow + 1 if ro_flow is not None else 3
 
@@ -472,7 +491,7 @@ with tab1:
                             'Rating_Comodidad': rc, 
                             'Rating_Seguridad': rs, 
                             'Action': 'Accepted',
-                            # NUEVAS COLUMNAS
+                            # NUEVAS COLUMNAS (pH system)
                             'Top_Abrigo': v_rt_a, 'Top_Comodidad': v_rt_c, 'Top_Flow': v_rt_f,
                             'Bot_Abrigo': v_rb_a, 'Bot_Comodidad': v_rb_c, 'Bot_Flow': v_rb_f,
                             'Out_Abrigo': v_ro_a, 'Out_Comodidad': v_ro_c, 'Out_Flow': v_ro_f
