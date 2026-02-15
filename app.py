@@ -11,7 +11,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v11.3", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v11.4", layout="centered", page_icon="🧥")
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
 def get_google_sheet_client():
@@ -103,7 +103,6 @@ def get_limit_for_item(category, sna):
     elif category in ['Remera', 'Camisa']: return LIMITES_USO.get(sna['tipo'], 2)
     return LIMITES_USO.get(sna['tipo'], 5)
 
-# --- NUEVA FUNCIÓN CLIMA (OPEN-METEO) ---
 def get_weather_open_meteo():
     try:
         url = "https://api.open-meteo.com/v1/forecast?latitude=-32.8908&longitude=-68.8272&current=temperature_2m,apparent_temperature,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=auto"
@@ -220,7 +219,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v11.3 - Bloqueo de Duplicados")
+st.sidebar.caption("v11.4 - Multi-Ocasión")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -243,41 +242,35 @@ if updated:
 df = st.session_state['inventory']
 weather = get_weather_open_meteo()
 
-# --- VISOR SIDEBAR ---
+# --- VISOR SIDEBAR INTELIGENTE (FILTRADO POR OCASIÓN) ---
 with st.sidebar:
     st.divider()
-    with st.expander("🕴️ Estado del Outfit", expanded=True):
+    with st.expander("🕴️ Estado: " + code_occ, expanded=True):
         try:
             fb = load_feedback_gsheet()
-            found_outfit = False
+            found_outfit_for_occ = False
             today_str = get_mendoza_time().strftime("%Y-%m-%d")
             
-            # --- CHEQUEO DE REGISTRO PREVIO PARA HOY ---
-            ya_registrado_hoy = False
+            ya_registrado_hoy = False # Variable de control para el botón principal
+
             if not fb.empty and 'Action' in fb.columns:
-                # Filtrar registros Aceptados de HOY
-                accepted = fb[fb['Action'] == 'Accepted']
+                # 1. Filtramos SOLO los Aceptados
+                accepted = fb[fb['Action'] == 'Accepted'].copy()
                 accepted['Date'] = accepted['Date'].astype(str)
-                registros_hoy = accepted[accepted['Date'].str.contains(today_str, na=False)]
                 
-                # Chequear si existe la misma OCASIÓN
-                if not registros_hoy.empty:
-                    if code_occ in registros_hoy['Occasion'].values:
-                        ya_registrado_hoy = True
+                # 2. Buscamos si hay registros para HOY y para la OCASIÓN SELECCIONADA
+                # Esto es clave: filtramos por code_occ
+                match_today_occ = accepted[
+                    (accepted['Date'].str.contains(today_str, na=False)) & 
+                    (accepted['Occasion'] == code_occ)
+                ]
 
-                if not accepted.empty:
-                    last = accepted.iloc[-1]
-                    last_date_str = str(last['Date']) 
-                    
-                    is_today = today_str in last_date_str
-                    
-                    if is_today:
-                        st.success("✅ Look de Hoy (Activo)")
-                    else:
-                        st.warning(f"⚠️ Sin registrar hoy")
-                        st.caption(f"Último: {last_date_str}")
-
-                    found_outfit = True
+                # Si encontramos uno para hoy y esta ocasión
+                if not match_today_occ.empty:
+                    last = match_today_occ.iloc[-1] # El último de esta ocasión hoy
+                    st.success(f"✅ Look de Hoy ({code_occ})")
+                    found_outfit_for_occ = True
+                    ya_registrado_hoy = True
                     
                     def show_mini(code, label):
                         if code and code != 'N/A' and code != 'nan':
@@ -292,9 +285,19 @@ with st.sidebar:
                     with c2: show_mini(last['Bottom'], "Bot")
                     if last['Outer'] and last['Outer'] != 'N/A':
                         show_mini(last['Outer'], "Out")
+                else:
+                    # Si no hay de hoy para esta ocasión, mostramos aviso
+                    st.warning(f"⚠️ Sin registrar {code_occ} hoy")
+                    
+                    # Opcional: Mostrar el último histórico de esta ocasión
+                    match_hist_occ = accepted[accepted['Occasion'] == code_occ]
+                    if not match_hist_occ.empty:
+                        last_hist = match_hist_occ.iloc[-1]
+                        st.caption(f"Último {code_occ}: {last_hist['Date']}")
             
-            if not found_outfit:
-                st.info("No hay historial. ¡Elegí un outfit!")
+            if not found_outfit_for_occ and not ya_registrado_hoy:
+                st.info(f"Esperando selección para {code_occ}...")
+
         except Exception as e:
             st.warning("Sin datos.")
 
@@ -401,7 +404,6 @@ with tab1:
                 with c_fb1: 
                     st.markdown("**🌡️ Abrigo (1-7)**")
                     show_gradient_bar()
-                    # Slider Global (1=Frio, 4=Bien, 7=Calor)
                     r_abrigo = st.select_slider("Global Abrigo", options=[1, 2, 3, 4, 5, 6, 7], value=4, label_visibility="collapsed", key="fb_abrigo")
                 with c_fb2: st.markdown("**☁️ Comodidad**"); r_comodidad = st.feedback("stars", key="fb_comodidad")
                 with c_fb3: st.markdown("**⚡ Flow**"); r_seguridad = st.feedback("stars", key="fb_estilo")
@@ -455,7 +457,6 @@ with tab1:
                         st.button("✅ Registrar Uso", disabled=True, key="btn_disabled")
                     else:
                         if st.button("✅ Registrar Uso (Forzado)", type="primary", use_container_width=True):
-                            # (Misma logica de registro, copiada abajo para evitar funciones complejas en st script lineal)
                             alerts = []
                             for item in selected_items_codes:
                                 idx = df[df['Code'] == item['Code']].index[0]
@@ -501,12 +502,10 @@ with tab1:
 
                             st.session_state['inventory'] = df; save_data_gsheet(df)
                             
-                            # Process Ratings
-                            ra = r_abrigo # Directo slider
+                            ra = r_abrigo
                             rc = r_comodidad + 1 if r_comodidad is not None else 3
                             rs = r_seguridad + 1 if r_seguridad is not None else 3
                             
-                            # Individuales
                             v_rt_a = rt_abr; v_rt_c = rt_com + 1 if rt_com is not None else 3; v_rt_f = rt_flow + 1 if rt_flow is not None else 3
                             v_rb_a = rb_abr; v_rb_c = rb_com + 1 if rb_com is not None else 3; v_rb_f = rb_flow + 1 if rb_flow is not None else 3
                             v_ro_a = ro_abr; v_ro_c = ro_com + 1 if ro_com is not None else 3; v_ro_f = ro_flow + 1 if ro_flow is not None else 3
@@ -744,3 +743,4 @@ with tab6:
         essentials = ["DNI / Pasaporte", "Cargador", "Cepillo Dientes", "Desodorante", "Auriculares", "Medicamentos", "Lentes", "Billetera"]
         cols_ch = st.columns(2)
         for i, item in enumerate(essentials): cols_ch[i % 2].checkbox(item, key=f"check_{i}")
+            
