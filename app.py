@@ -11,7 +11,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v10.4", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v10.5", layout="centered", page_icon="🧥")
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
 def get_google_sheet_client():
@@ -153,7 +153,6 @@ def recommend_outfit(df, weather, occasion, seed):
 
     def get_best(cats, ess=True):
         curr_s = get_current_season()
-        # Filtro actualizado para usar target_occasions con .isin()
         pool = clean[(clean['Category'].isin(cats)) & (clean['Occasion'].isin(target_occasions)) & ((clean['Season'] == curr_s) | (clean['Season'] == 'T'))]
         
         if pool.empty: pool = clean[(clean['Category'].isin(cats)) & (clean['Occasion'].isin(target_occasions))]
@@ -201,7 +200,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v10.4 - Estadísticas Full")
+st.sidebar.caption("v10.5 - Stats & Travel")
 
 # API KEY AUTOMÁTICA
 if "openweathermap" in st.secrets:
@@ -231,7 +230,7 @@ if updated:
 df = st.session_state['inventory']
 weather = get_weather(api_key, user_city)
 
-# --- VISOR OUTFIT (LÓGICA ACTUALIZADA PARA HOY) ---
+# --- VISOR OUTFIT SIDEBAR ---
 with st.sidebar:
     st.divider()
     with st.expander("🕴️ Estado del Outfit", expanded=True):
@@ -244,9 +243,8 @@ with st.sidebar:
                 accepted = fb[fb['Action'] == 'Accepted']
                 if not accepted.empty:
                     last = accepted.iloc[-1]
-                    last_date_str = str(last['Date']) # Esperado formato YYYY-MM-DD HH:MM
+                    last_date_str = str(last['Date']) 
                     
-                    # Chequeo si la fecha coincide con HOY
                     is_today = today_str in last_date_str
                     
                     if is_today:
@@ -389,7 +387,8 @@ with tab1:
                             idx = df[df['Code'] == item['Code']].index[0]
                             curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
                             df.at[idx, 'Uses'] = curr + 1
-                            df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d") # <--- AQUI SE AGREGO LA FECHA
+                            # --- NUEVO: GUARDA LA FECHA PARA "PRENDAS MUERTAS" ---
+                            df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
 
                         st.session_state['inventory'] = df; save_data_gsheet(df)
                         ra = r_abrigo + 1 if r_abrigo is not None else 3
@@ -472,9 +471,9 @@ with tab4:
             st.success(f"¡{code} subido a Google Sheets!")
 
 with tab5:
-    st.header("📊 Estadísticas Avanzadas")
+    st.header("📊 Estadísticas Completas")
 
-    # --- 1. LÓGICA DE LAVADERO DETALLADO ---
+    # --- 1. LAVADERO DETALLADO ---
     if not df.empty:
         total_items = len(df)
         dirty_items = df[df['Status'].isin(['Sucio', 'Lavando'])]
@@ -483,145 +482,100 @@ with tab5:
         
         rate_dirty = count_dirty / total_items if total_items > 0 else 0
         
-        st.caption("Estado del Lavadero")
+        st.caption("🧺 Estado del Lavadero")
+        # Texto detallado con cantidades
         st.progress(rate_dirty, text=f"Suciedad: {int(rate_dirty*100)}% ({count_clean} Limpias | {count_dirty} Sucias)")
     
     st.divider()
 
-    col_stats_1, col_stats_2 = st.columns(2)
+    # --- 2. FILA DE USO (Viejo + Nuevo) ---
+    c_s1, c_s2 = st.columns(2)
+    
+    with c_s1:
+        st.subheader("🔥 Top 5 Más Usadas")
+        if not df.empty:
+            df['Uses'] = pd.to_numeric(df['Uses'], errors='coerce').fillna(0)
+            top_5 = df.sort_values(by='Uses', ascending=False).head(5)
+            st.dataframe(top_5[['Code', 'Category', 'Uses']], hide_index=True, use_container_width=True)
 
-    # --- 2. PRENDAS MUERTAS (Cementerio) ---
-    with col_stats_1:
+    with c_s2:
         st.subheader("👻 Prendas Muertas")
-        st.caption("Limpias y sin uso (>90 días)")
+        st.caption(">90 días sin uso")
         
         def is_dead_stock(row):
-            # Solo analizamos si está limpia
-            if row['Status'] != 'Limpio': 
-                return False
-            
-            # Si no tiene fecha registrada, asumimos que no se usa hace mucho
-            if pd.isna(row['LastWorn']) or str(row['LastWorn']) in ['', 'nan', 'None']:
-                return True
-            
-            # Si tiene fecha, calculamos días
+            if row['Status'] != 'Limpio': return False
+            if pd.isna(row['LastWorn']) or str(row['LastWorn']) in ['', 'nan', 'None']: return True
             try:
                 last_date = datetime.fromisoformat(str(row['LastWorn']))
-                # Si pasaron más de 90 días
-                if (datetime.now() - last_date).days > 90:
-                    return True
-            except:
-                return True # Si falla la fecha, asumimos muerta
-            
+                if (datetime.now() - last_date).days > 90: return True
+            except: return True
             return False
 
         dead_df = df[df.apply(is_dead_stock, axis=1)]
-        
         if not dead_df.empty:
-            st.dataframe(
-                dead_df[['Category', 'Code', 'LastWorn']], 
-                hide_index=True, 
-                use_container_width=True,
-                column_config={
-                    "LastWorn": st.column_config.TextColumn("Último Uso"),
-                    "Code": "Código"
-                }
-            )
-            if st.button("🗑️ Sugerir Donación (Simulado)"):
-                st.toast("Podrías regalar estas prendas.")
+            st.dataframe(dead_df[['Category', 'Code']], hide_index=True, use_container_width=True)
         else:
-            st.success("¡Tu rotación es perfecta! No hay prendas muertas.")
+            st.success("¡Rotación impecable!")
 
-    # --- 3. TENDENCIA DE FLOW (Top Rated) ---
-    with col_stats_2:
-        st.subheader("🔥 Top Flow")
-        st.caption("Tus favoritas según feedback")
-        
+    st.divider()
+
+    # --- 3. FILA DE FLOW (Nuevo + Viejo) ---
+    c_f1, c_f2 = st.columns(2)
+
+    with c_f1:
+        st.subheader("⭐ Ranking Flow")
         try:
             fb = load_feedback_gsheet()
             if not fb.empty and 'Action' in fb.columns:
-                # Filtramos solo lo que te pusiste (Action = Accepted)
                 accepted = fb[fb['Action'] == 'Accepted'].copy()
-                
-                # Convertimos ratings a números
                 cols_rate = ['Rating_Abrigo', 'Rating_Comodidad', 'Rating_Seguridad']
-                for c in cols_rate:
-                    accepted[c] = pd.to_numeric(accepted[c], errors='coerce').fillna(3)
-                
-                # Calculamos puntaje promedio por registro
+                for c in cols_rate: accepted[c] = pd.to_numeric(accepted[c], errors='coerce').fillna(3)
                 accepted['Score'] = accepted[cols_rate].mean(axis=1)
                 
-                # "Derretimos" (Unpivot) la tabla para tener una lista larga de códigos
-                melted = accepted.melt(
-                    id_vars=['Score'], 
-                    value_vars=['Top', 'Bottom', 'Outer'], 
-                    value_name='Code'
-                ).dropna()
-                
-                # Filtramos códigos vacíos o N/A
+                melted = accepted.melt(id_vars=['Score'], value_vars=['Top', 'Bottom', 'Outer'], value_name='Code').dropna()
                 melted = melted[~melted['Code'].isin(['N/A', 'nan', ''])]
-                
-                # Agrupamos por Código y calculamos promedio de Score
-                ranking = melted.groupby('Code')['Score'].mean().reset_index()
-                ranking = ranking.sort_values(by='Score', ascending=False).head(5)
-                
-                # Cruzamos con el Inventario para tener la Foto y Categoría
+                ranking = melted.groupby('Code')['Score'].mean().reset_index().sort_values(by='Score', ascending=False).head(5)
                 ranking = ranking.merge(df[['Code', 'Category', 'ImageURL']], on='Code', how='left')
                 
-                # Mostramos tabla bonita con imágenes
-                st.dataframe(
-                    ranking[['ImageURL', 'Category', 'Score']],
-                    hide_index=True,
-                    use_container_width=True,
-                    column_config={
-                        "ImageURL": st.column_config.ImageColumn("Foto"),
-                        "Score": st.column_config.ProgressColumn("Rating", min_value=1, max_value=5, format="%.1f ⭐"),
-                        "Category": "Prenda"
-                    }
-                )
-            else:
-                st.info("Falta data de feedback para calcular tu Flow.")
-        except Exception as e:
-            st.error(f"Error calculando Flow: {e}")
+                st.dataframe(ranking[['Category', 'Score']], hide_index=True, use_container_width=True)
+            else: st.info("Falta feedback.")
+        except: st.error("Error en Flow.")
+
+    with c_f2:
+        st.subheader("📈 Tendencia Histórica")
+        try:
+            fb = load_feedback_gsheet()
+            if not fb.empty:
+                fb['Avg_Score'] = (pd.to_numeric(fb['Rating_Abrigo'], errors='coerce') + 
+                                   pd.to_numeric(fb['Rating_Comodidad'], errors='coerce') + 
+                                   pd.to_numeric(fb['Rating_Seguridad'], errors='coerce')) / 3
+                fb['Day'] = fb['Date'].astype(str).str.slice(0, 10)
+                daily_trend = fb.groupby('Day')['Avg_Score'].mean()
+                st.line_chart(daily_trend)
+        except: st.info("Sin datos.")
 
 with tab6:
     st.header("✈️ Modo Viaje v2.0") 
     
-    # --- CONFIGURACIÓN DEL VIAJE ---
     col_dest, col_days = st.columns([2, 1])
-    with col_dest:
-        dest_city = st.text_input("📍 Destino", value="Buenos Aires")
-    with col_days:
-        num_days = st.number_input("📅 Días", min_value=1, max_value=30, value=3)
+    with col_dest: dest_city = st.text_input("📍 Destino", value="Buenos Aires")
+    with col_days: num_days = st.number_input("📅 Días", min_value=1, max_value=30, value=3)
 
-    # --- BOTÓN GENERAR ---
     if st.button("🎒 Generar Propuesta de Valija", type="primary", use_container_width=True):
         packable = df[df['Status'] == 'Limpio']
-        
-        if packable.empty:
-            st.error("¡No tenés ropa limpia para viajar!")
+        if packable.empty: st.error("¡No tenés ropa limpia para viajar!")
         else:
-            # Cálculo simple
-            n_tops = num_days + 1
-            n_bots = (num_days // 2) + 1
-            n_out = 2
-            
-            # Selección
+            n_tops = num_days + 1; n_bots = (num_days // 2) + 1; n_out = 2
             tops = packable[packable['Category'].isin(['Remera', 'Camisa'])]
             if len(tops) > n_tops: tops = tops.sample(n_tops)
-            
             bots = packable[packable['Category'] == 'Pantalón']
             if len(bots) > n_bots: bots = bots.sample(n_bots)
-            
             outs = packable[packable['Category'].isin(['Campera', 'Buzo'])]
             if len(outs) > n_out: outs = outs.sample(n_out)
-            
-            # Guardar en sesión
             st.session_state['travel_pack'] = pd.concat([tops, bots, outs])
             st.session_state['travel_selections'] = {} 
-            st.rerun() # Forzamos recarga para mostrar resultados
+            st.rerun() 
 
-    # --- MOSTRAR VALIJA (Solo si existe) ---
     if st.session_state.get('travel_pack') is not None:
         pack = st.session_state['travel_pack']
         st.divider()
@@ -634,39 +588,27 @@ with tab6:
                     img = cargar_imagen_desde_url(row['ImageURL'])
                     if img: st.image(img, use_container_width=True)
                     else: st.write("📷 Sin foto")
-                    
                     st.caption(f"{row['Category']} ({row['Code']})")
-                    
-                    # Checkboxes
                     c_ida, c_vuelta = st.columns(2)
                     is_ida = c_ida.checkbox("Ida", key=f"ida_{row['Code']}")
                     is_vuelta = c_vuelta.checkbox("Vuel", key=f"vuelta_{row['Code']}")
-                    
-                    # Guardar selección
                     if 'travel_selections' not in st.session_state: st.session_state['travel_selections'] = {}
                     st.session_state['travel_selections'][row['Code']] = {'ida': is_ida, 'vuelta': is_vuelta}
 
-        # --- RESUMEN ---
         st.divider()
         sel = st.session_state.get('travel_selections', {})
         ida_items = [code for code, vals in sel.items() if vals.get('ida')]
         vuelta_items = [code for code, vals in sel.items() if vals.get('vuelta')]
-        
         c1, c2 = st.columns(2)
         c1.info(f"🛫 **Ida:** {', '.join(ida_items) if ida_items else '---'}")
         c2.success(f"🛬 **Vuelta:** {', '.join(vuelta_items) if vuelta_items else '---'}")
 
-        # --- BOTÓN DE RESET ---
         st.divider()
         if st.button("🗑️ Borrar Valija y Empezar de Nuevo", type="secondary", use_container_width=True):
-            st.session_state['travel_pack'] = None
-            st.session_state['travel_selections'] = {}
-            st.rerun()
+            st.session_state['travel_pack'] = None; st.session_state['travel_selections'] = {}; st.rerun()
 
-    # --- CHECKLIST (Siempre visible ahora) ---
     st.divider()
     with st.expander("📋 Checklist de Supervivencia (No olvidar)", expanded=False):
         essentials = ["DNI / Pasaporte", "Cargador", "Cepillo Dientes", "Desodorante", "Auriculares", "Medicamentos", "Lentes", "Billetera"]
         cols_ch = st.columns(2)
-        for i, item in enumerate(essentials):
-            cols_ch[i % 2].checkbox(item, key=f"check_{i}")
+        for i, item in enumerate(essentials): cols_ch[i % 2].checkbox(item, key=f"check_{i}")
