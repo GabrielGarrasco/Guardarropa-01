@@ -11,7 +11,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v10.5", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v10.6", layout="centered", page_icon="🧥")
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
 def get_google_sheet_client():
@@ -145,11 +145,9 @@ def recommend_outfit(df, weather, occasion, seed):
     t_min = weather.get('min', weather['temp']) + 3
     final = []
 
-    # --- LÓGICA MODIFICADA: Si es Formal (F), incluye Universidad (U) ---
     target_occasions = [occasion]
     if occasion == 'F':
         target_occasions = ['F', 'U']
-    # --------------------------------------------------------------------
 
     def get_best(cats, ess=True):
         curr_s = get_current_season()
@@ -200,9 +198,8 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v10.5 - Stats & Travel")
+st.sidebar.caption("v10.6 - Stats Fix")
 
-# API KEY AUTOMÁTICA
 if "openweathermap" in st.secrets:
     api_key = st.secrets["openweathermap"]["api_key"]
 else:
@@ -212,7 +209,6 @@ user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
 code_occ = user_occ[0]
 
-# CARGA DE DATOS
 if 'inventory' not in st.session_state: 
     with st.spinner("Cargando sistema..."):
         st.session_state['inventory'] = load_data_gsheet()
@@ -230,7 +226,7 @@ if updated:
 df = st.session_state['inventory']
 weather = get_weather(api_key, user_city)
 
-# --- VISOR OUTFIT SIDEBAR ---
+# --- VISOR SIDEBAR ---
 with st.sidebar:
     st.divider()
     with st.expander("🕴️ Estado del Outfit", expanded=True):
@@ -271,7 +267,6 @@ with st.sidebar:
             
             if not found_outfit:
                 st.info("No hay historial. ¡Elegí un outfit!")
-                
         except Exception as e:
             st.warning("Sin datos.")
 
@@ -387,7 +382,6 @@ with tab1:
                             idx = df[df['Code'] == item['Code']].index[0]
                             curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
                             df.at[idx, 'Uses'] = curr + 1
-                            # --- NUEVO: GUARDA LA FECHA PARA "PRENDAS MUERTAS" ---
                             df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
 
                         st.session_state['inventory'] = df; save_data_gsheet(df)
@@ -473,7 +467,6 @@ with tab4:
 with tab5:
     st.header("📊 Estadísticas Completas")
 
-    # --- 1. LAVADERO DETALLADO ---
     if not df.empty:
         total_items = len(df)
         dirty_items = df[df['Status'].isin(['Sucio', 'Lavando'])]
@@ -483,12 +476,10 @@ with tab5:
         rate_dirty = count_dirty / total_items if total_items > 0 else 0
         
         st.caption("🧺 Estado del Lavadero")
-        # Texto detallado con cantidades
         st.progress(rate_dirty, text=f"Suciedad: {int(rate_dirty*100)}% ({count_clean} Limpias | {count_dirty} Sucias)")
     
     st.divider()
 
-    # --- 2. FILA DE USO (Viejo + Nuevo) ---
     c_s1, c_s2 = st.columns(2)
     
     with c_s1:
@@ -504,11 +495,12 @@ with tab5:
         
         def is_dead_stock(row):
             if row['Status'] != 'Limpio': return False
-            if pd.isna(row['LastWorn']) or str(row['LastWorn']) in ['', 'nan', 'None']: return True
+            # Si no tiene fecha, es NUEVA -> No la mostramos
+            if pd.isna(row['LastWorn']) or str(row['LastWorn']) in ['', 'nan', 'None']: return False
             try:
                 last_date = datetime.fromisoformat(str(row['LastWorn']))
                 if (datetime.now() - last_date).days > 90: return True
-            except: return True
+            except: return False
             return False
 
         dead_df = df[df.apply(is_dead_stock, axis=1)]
@@ -519,7 +511,6 @@ with tab5:
 
     st.divider()
 
-    # --- 3. FILA DE FLOW (Nuevo + Viejo) ---
     c_f1, c_f2 = st.columns(2)
 
     with c_f1:
