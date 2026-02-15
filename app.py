@@ -11,7 +11,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v10.6", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v11.0", layout="centered", page_icon="🧥")
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
 def get_google_sheet_client():
@@ -103,14 +103,38 @@ def get_limit_for_item(category, sna):
     elif category in ['Remera', 'Camisa']: return LIMITES_USO.get(sna['tipo'], 2)
     return LIMITES_USO.get(sna['tipo'], 5)
 
-def get_weather(api_key, city):
-    if not api_key: return {"temp": 24, "feels_like": 22, "min": 18, "max": 30, "desc": "Modo Demo"}
+# --- NUEVA FUNCIÓN CLIMA (OPEN-METEO) ---
+def get_weather_open_meteo():
+    # Coordenadas Mendoza: -32.8908, -68.8272
     try:
-        url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={api_key}&units=metric&lang=es"
+        url = "https://api.open-meteo.com/v1/forecast?latitude=-32.8908&longitude=-68.8272&current=temperature_2m,apparent_temperature,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=auto"
         res = requests.get(url).json()
-        if res.get("cod") != 200: return {"temp": 0, "feels_like": 0, "min": 0, "max": 0, "desc": "Error API"}
-        return {"temp": res['main']['temp'], "feels_like": res['main']['feels_like'], "min": res['main']['temp_min'], "max": res['main']['temp_max'], "desc": res['weather'][0]['description'].capitalize()}
-    except: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error Conexión"}
+        
+        if 'current' not in res:
+            return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error API"}
+
+        current = res['current']
+        daily = res['daily']
+        
+        # Decodificar código WMO
+        code = current['weather_code']
+        desc = "Despejado"
+        if code in [1, 2, 3]: desc = "Algo Nublado"
+        elif code in [45, 48]: desc = "Niebla"
+        elif code in [51, 53, 55]: desc = "Llovizna"
+        elif code in [61, 63, 65]: desc = "Lluvia"
+        elif code in [71, 73, 75]: desc = "Nieve"
+        elif code >= 95: desc = "Tormenta"
+        
+        return {
+            "temp": current['temperature_2m'],
+            "feels_like": current['apparent_temperature'],
+            "min": daily['temperature_2m_min'][0],
+            "max": daily['temperature_2m_max'][0],
+            "desc": desc
+        }
+    except:
+        return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error Conexión"}
 
 def check_laundry_timers(df):
     updated = False
@@ -198,12 +222,9 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v10.6 - Stats Fix")
+st.sidebar.caption("v11.0 - Clima OpenMeteo")
 
-if "openweathermap" in st.secrets:
-    api_key = st.secrets["openweathermap"]["api_key"]
-else:
-    api_key = st.sidebar.text_input("🔑 API Key OWM", type="password")
+# ELIMINADO EL INPUT DE API KEY. YA NO ES NECESARIO.
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -224,7 +245,7 @@ if updated:
     save_data_gsheet(df_checked) 
 
 df = st.session_state['inventory']
-weather = get_weather(api_key, user_city)
+weather = get_weather_open_meteo() # <--- AQUI USAMOS LA NUEVA FUNCION
 
 # --- VISOR SIDEBAR ---
 with st.sidebar:
@@ -495,7 +516,7 @@ with tab5:
         
         def is_dead_stock(row):
             if row['Status'] != 'Limpio': return False
-            # Si no tiene fecha, es NUEVA -> No la mostramos
+            # Si no tiene fecha, asumimos que es NUEVA y no la mostramos en "Muertas"
             if pd.isna(row['LastWorn']) or str(row['LastWorn']) in ['', 'nan', 'None']: return False
             try:
                 last_date = datetime.fromisoformat(str(row['LastWorn']))
