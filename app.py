@@ -11,7 +11,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v11.0", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v11.1", layout="centered", page_icon="🧥")
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
 def get_google_sheet_client():
@@ -105,7 +105,6 @@ def get_limit_for_item(category, sna):
 
 # --- NUEVA FUNCIÓN CLIMA (OPEN-METEO) ---
 def get_weather_open_meteo():
-    # Coordenadas Mendoza: -32.8908, -68.8272
     try:
         url = "https://api.open-meteo.com/v1/forecast?latitude=-32.8908&longitude=-68.8272&current=temperature_2m,apparent_temperature,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=auto"
         res = requests.get(url).json()
@@ -116,7 +115,6 @@ def get_weather_open_meteo():
         current = res['current']
         daily = res['daily']
         
-        # Decodificar código WMO
         code = current['weather_code']
         desc = "Despejado"
         if code in [1, 2, 3]: desc = "Algo Nublado"
@@ -222,9 +220,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v11.0 - Clima OpenMeteo")
-
-# ELIMINADO EL INPUT DE API KEY. YA NO ES NECESARIO.
+st.sidebar.caption("v11.1 - Feedback Detallado")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -245,7 +241,7 @@ if updated:
     save_data_gsheet(df_checked) 
 
 df = st.session_state['inventory']
-weather = get_weather_open_meteo() # <--- AQUI USAMOS LA NUEVA FUNCION
+weather = get_weather_open_meteo()
 
 # --- VISOR SIDEBAR ---
 with st.sidebar:
@@ -383,11 +379,46 @@ with tab1:
         else:
             if st.session_state['confirm_stage'] == 0:
                 st.markdown("### ⭐ Calificación del día")
+                
+                # --- CALIFICACIÓN GLOBAL ---
+                st.caption("Puntuación General del Outfit")
                 c_fb1, c_fb2, c_fb3 = st.columns(3)
                 with c_fb1: st.markdown("**🌡️ Abrigo**"); r_abrigo = st.feedback("stars", key="fb_abrigo")
                 with c_fb2: st.markdown("**☁️ Comodidad**"); r_comodidad = st.feedback("stars", key="fb_comodidad")
                 with c_fb3: st.markdown("**⚡ Flow**"); r_seguridad = st.feedback("stars", key="fb_estilo")
+
+                st.divider()
+                st.markdown("### 🧥 Calificación por Prenda")
                 
+                # --- CALIFICACIÓN INDIVIDUAL: TOP ---
+                rt_abr, rt_com, rt_flow = None, None, None
+                if rec_top and rec_top != "N/A":
+                    st.markdown(f"**Top:** `{rec_top}`")
+                    c_t1, c_t2, c_t3 = st.columns(3)
+                    with c_t1: rt_abr = st.feedback("stars", key="star_top_abr")
+                    with c_t2: rt_com = st.feedback("stars", key="star_top_com")
+                    with c_t3: rt_flow = st.feedback("stars", key="star_top_flow")
+
+                # --- CALIFICACIÓN INDIVIDUAL: BOTTOM ---
+                rb_abr, rb_com, rb_flow = None, None, None
+                if rec_bot and rec_bot != "N/A":
+                    st.markdown(f"**Bottom:** `{rec_bot}`")
+                    c_b1, c_b2, c_b3 = st.columns(3)
+                    with c_b1: rb_abr = st.feedback("stars", key="star_bot_abr")
+                    with c_b2: rb_com = st.feedback("stars", key="star_bot_com")
+                    with c_b3: rb_flow = st.feedback("stars", key="star_bot_flow")
+                
+                # --- CALIFICACIÓN INDIVIDUAL: OUTER ---
+                ro_abr, ro_com, ro_flow = None, None, None
+                if rec_out and rec_out != "N/A":
+                    st.markdown(f"**Outer:** `{rec_out}`")
+                    c_o1, c_o2, c_o3 = st.columns(3)
+                    with c_o1: ro_abr = st.feedback("stars", key="star_out_abr")
+                    with c_o2: ro_com = st.feedback("stars", key="star_out_com")
+                    with c_o3: ro_flow = st.feedback("stars", key="star_out_flow")
+
+                st.divider()
+
                 if st.button("✅ Registrar Uso", type="primary", use_container_width=True):
                     alerts = []
                     for item in selected_items_codes:
@@ -406,11 +437,47 @@ with tab1:
                             df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
 
                         st.session_state['inventory'] = df; save_data_gsheet(df)
+                        
+                        # Process Ratings (Default to 3 if None)
                         ra = r_abrigo + 1 if r_abrigo is not None else 3
                         rc = r_comodidad + 1 if r_comodidad is not None else 3
                         rs = r_seguridad + 1 if r_seguridad is not None else 3
+                        
+                        # Process Individual Ratings
+                        # Top
+                        v_rt_a = rt_abr + 1 if rt_abr is not None else 3
+                        v_rt_c = rt_com + 1 if rt_com is not None else 3
+                        v_rt_f = rt_flow + 1 if rt_flow is not None else 3
+                        # Bot
+                        v_rb_a = rb_abr + 1 if rb_abr is not None else 3
+                        v_rb_c = rb_com + 1 if rb_com is not None else 3
+                        v_rb_f = rb_flow + 1 if rb_flow is not None else 3
+                        # Out
+                        v_ro_a = ro_abr + 1 if ro_abr is not None else 3
+                        v_ro_c = ro_com + 1 if ro_com is not None else 3
+                        v_ro_f = ro_flow + 1 if ro_flow is not None else 3
+
                         st.session_state['custom_overrides'] = {} 
-                        entry = {'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada, 'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 'Rating_Abrigo': ra, 'Rating_Comodidad': rc, 'Rating_Seguridad': rs, 'Action': 'Accepted'}
+                        
+                        entry = {
+                            'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 
+                            'City': user_city, 
+                            'Temp_Real': weather['temp'], 
+                            'User_Adj_Temp': temp_calculada, 
+                            'Occasion': code_occ, 
+                            'Top': rec_top, 
+                            'Bottom': rec_bot, 
+                            'Outer': rec_out, 
+                            'Rating_Abrigo': ra, 
+                            'Rating_Comodidad': rc, 
+                            'Rating_Seguridad': rs, 
+                            'Action': 'Accepted',
+                            # NUEVAS COLUMNAS
+                            'Top_Abrigo': v_rt_a, 'Top_Comodidad': v_rt_c, 'Top_Flow': v_rt_f,
+                            'Bot_Abrigo': v_rb_a, 'Bot_Comodidad': v_rb_c, 'Bot_Flow': v_rb_f,
+                            'Out_Abrigo': v_ro_a, 'Out_Comodidad': v_ro_c, 'Out_Flow': v_ro_f
+                        }
+                        
                         save_feedback_entry_gsheet(entry); st.toast("¡Outfit registrado!"); st.rerun()
 
             elif st.session_state['confirm_stage'] == 1:
