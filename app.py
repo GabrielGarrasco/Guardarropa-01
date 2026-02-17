@@ -12,7 +12,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import random
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v13.0", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v13.1", layout="centered", page_icon="🧥")
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
 def get_google_sheet_client():
@@ -161,21 +161,9 @@ def get_weather_emoji(code):
     if code >= 95: return "⚡"
     return "☁️"
 
-# --- LÓGICA DE NEGOCIO ---
-def check_laundry_timers(df):
-    updated = False
-    now = datetime.now()
-    for idx, row in df.iterrows():
-        if row['Status'] == 'Lavando':
-            if pd.notna(row['LaundryStart']) and str(row['LaundryStart']) not in ['', 'nan']:
-                try:
-                    start = datetime.fromisoformat(str(row['LaundryStart']))
-                    if (now - start).total_seconds() > 86400:
-                        df.at[idx, 'Status'] = 'Limpio'; df.at[idx, 'Uses'] = 0; df.at[idx, 'LaundryStart'] = ''; updated = True
-                except: pass
-            else:
-                df.at[idx, 'LaundryStart'] = now.isoformat(); updated = True
-    return df, updated
+# --- LÓGICA DE NEGOCIO Y AYUDAS ---
+# Desactivado el timer automático para que tengas control manual total
+# def check_laundry_timers(df): ... 
 
 def is_item_usable(row):
     # Verifica si la prenda está limpia y NO ha superado su límite de uso
@@ -189,8 +177,21 @@ def is_item_usable(row):
     except: pass
     return True
 
+def is_needs_wash(row):
+    # Esta función determina si una prenda está sucia REALMENTE
+    # (Ya sea porque el estado es 'Sucio' O porque 'Uses' >= Límite)
+    if row['Status'] in ['Sucio', 'Lavando']: return True
+    
+    sna = decodificar_sna(row['Code'])
+    if not sna: return False
+    limit = get_limit_for_item(row['Category'], sna)
+    try:
+        uses = int(float(row['Uses'])) if row['Uses'] not in ['', 'nan'] else 0
+        return uses >= limit
+    except: return False
+
 def recommend_outfit(df, weather, occasion, seed):
-    # 1. Filtro estricto de usabilidad (Limpio y con vida útil)
+    # Usamos is_item_usable que ya filtra las que pasaron el límite
     usable_df = df[df.apply(is_item_usable, axis=1)].copy()
     
     if usable_df.empty: return pd.DataFrame(), 0
@@ -205,7 +206,7 @@ def recommend_outfit(df, weather, occasion, seed):
             blacklist = set(rej['Top'].dropna().tolist() + rej['Bottom'].dropna().tolist() + rej['Outer'].dropna().tolist())
     except: pass
     
-    t_feel = weather.get('feels_like', weather['temp']) + 3 # Ajuste personal
+    t_feel = weather.get('feels_like', weather['temp']) + 3 
     t_max = weather.get('max', weather['temp']) + 3
     t_min = weather.get('min', weather['temp']) + 3
     final = []
@@ -216,12 +217,9 @@ def recommend_outfit(df, weather, occasion, seed):
 
     def get_best(cats, ess=True):
         curr_s = get_current_season()
-        # Filtro base: Categoría, Ocasión y Temporada (actual o Todo el año)
         pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occasions)) & ((usable_df['Season'] == curr_s) | (usable_df['Season'] == 'T'))]
         
-        # Fallback si no hay de temporada exacta
         if pool.empty: pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occasions))]
-        # Fallback de emergencia
         if pool.empty and ess: pool = usable_df[usable_df['Category'].isin(cats)]
         if pool.empty: return None
         
@@ -231,27 +229,23 @@ def recommend_outfit(df, weather, occasion, seed):
             if not sna: continue
             match = False
             
-            # --- REGLAS CLIMÁTICAS AJUSTADAS ---
             if r['Category'] == 'Pantalón':
                 attr = sna['attr']
-                if t_max > 25: # Hace calor -> Prohibido Jean pesado
+                if t_max > 25: 
                     if attr in ['Sh', 'DC', 'Ve']: match = True
-                    elif attr == 'DL': match = False # Deportivo Largo da calor
-                    elif attr == 'Je': match = False # Jean da calor
-                elif t_feel < 15: # Hace frio -> Prohibido Cortos
+                    elif attr == 'DL': match = False 
+                    elif attr == 'Je': match = False 
+                elif t_feel < 15: 
                     if attr in ['Je', 'DL']: match = True
-                else: # Clima medio
-                    match = True
+                else: match = True
             
             elif r['Category'] in ['Remera', 'Camisa']:
                 attr = sna['attr']
-                # Si hace mucho calor (>30), priorizar sin mangas o cortas
                 if t_max > 30:
                     if attr in ['00', '01']: match = True
-                elif t_feel < 18: # Fresco -> Manga larga
+                elif t_feel < 18:
                     if attr == '02': match = True
-                else: 
-                    match = True
+                else: match = True
 
             elif r['Category'] in ['Campera', 'Buzo']:
                 try:
@@ -264,21 +258,14 @@ def recommend_outfit(df, weather, occasion, seed):
             if match: cands.append(r)
         
         f_pool = pd.DataFrame(cands) if cands else pool
-        
-        # Eliminar items rechazados hoy
         nb = f_pool[~f_pool['Code'].isin(blacklist)]
         
-        # --- LÓGICA DE ROTACIÓN ---
-        # Si hay opciones, ordenar por LastWorn (los que hace más tiempo no uso primero)
-        # Convertimos LastWorn a fecha, los NaT/Vacíos se consideran muy viejos (buenos para usar)
         if not nb.empty:
             nb['LastWornDate'] = pd.to_datetime(nb['LastWorn'], errors='coerce').fillna(pd.Timestamp('2000-01-01'))
-            # Ordenamos ascendente (los más viejos arriba) y tomamos el top 3 para aleatoriedad
             nb = nb.sort_values('LastWornDate', ascending=True)
             candidates = nb.head(3) 
-            return candidates.sample(1, random_state=seed).iloc[0] # Random entre los 3 menos usados
+            return candidates.sample(1, random_state=seed).iloc[0] 
         else:
-             # Si no hay candidatos limpios no baneados, devolvemos del pool general (aunque ya se haya usado recientemente)
              return f_pool.sample(1, random_state=seed).iloc[0]
 
     top = get_best(['Remera', 'Camisa']); 
@@ -291,7 +278,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v13.0 - Smart Travel & Laundry")
+st.sidebar.caption("v13.1 - Fix Suciedad")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -300,17 +287,13 @@ code_occ = user_occ[0]
 if 'inventory' not in st.session_state: 
     with st.spinner("Cargando sistema..."):
         st.session_state['inventory'] = load_data_gsheet()
-if 'seed' not in st.session_state: st.session_state['seed'] = random.randint(1, 1000) # Seed aleatoria al inicio para variedad
+if 'seed' not in st.session_state: st.session_state['seed'] = random.randint(1, 1000) 
 if 'custom_overrides' not in st.session_state: st.session_state['custom_overrides'] = {}
 if 'change_mode' not in st.session_state: st.session_state['change_mode'] = False
 if 'confirm_stage' not in st.session_state: st.session_state['confirm_stage'] = 0 
 if 'alerts_buffer' not in st.session_state: st.session_state['alerts_buffer'] = []
 
-df_checked, updated = check_laundry_timers(st.session_state['inventory'])
-if updated:
-    st.session_state['inventory'] = df_checked
-    save_data_gsheet(df_checked) 
-
+# Eliminado el check_laundry_timers automatico
 df = st.session_state['inventory']
 weather = get_weather_open_meteo()
 
@@ -363,10 +346,8 @@ with st.sidebar:
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Viaje"])
 
 with tab1:
-    # Generar recomendación
     recs_df, temp_calculada = recommend_outfit(df, weather, code_occ, st.session_state['seed'])
 
-    # Aplicar overrides manuales
     for cat_key, code_val in st.session_state['custom_overrides'].items():
         if code_val and code_val in df['Code'].values:
             manual_item = df[df['Code'] == code_val].iloc[0]
@@ -386,7 +367,6 @@ with tab1:
     with col_h2: 
         c_btn1, c_btn2 = st.columns(2)
         if c_btn1.button("🔄 Cambiar", use_container_width=True): 
-            # Cambiamos seed para randomizar y limpiamos overrides
             st.session_state['seed'] = random.randint(1, 1000)
             st.session_state['change_mode'] = not st.session_state['change_mode']
             st.session_state['custom_overrides'] = {}
@@ -427,7 +407,7 @@ with tab1:
                 st.markdown(f"**{item['Category']}**")
                 st.caption(f"Code: `{item['Code']}`")
                 st.progress(health, text=f"Vida: {uses}/{limit}")
-                if health == 0: st.error("⚠️ AL LIMITE: Lavar") # Indicador visual extra
+                if health == 0: st.error("⚠️ AL LIMITE: Lavar") 
                 return item
             else: st.info("🤷‍♂️ N/A"); return None
 
@@ -454,11 +434,10 @@ with tab1:
                     ra = n_abr + 1 if n_abr is not None else 3
                     entry = {'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada, 'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 'Rating_Abrigo': ra, 'Rating_Comodidad': 3, 'Rating_Seguridad': 3, 'Action': 'Rejected'}
                     save_feedback_entry_gsheet(entry)
-                    st.session_state['seed'] = random.randint(1, 1000) # Nueva seed
+                    st.session_state['seed'] = random.randint(1, 1000) 
                     st.session_state['change_mode'] = False
                     st.rerun()
         else:
-            # FLUJO DE CONFIRMACIÓN
             if st.session_state['confirm_stage'] == 0:
                 st.markdown("### ⭐ Calificación del día")
                 
@@ -512,7 +491,6 @@ with tab1:
 
                 st.divider()
 
-                # BOTONES DE REGISTRO
                 if ya_registrado_hoy:
                     st.success(f"✅ Ya registraste un outfit para '{code_occ}' hoy.")
                     force_register = st.checkbox("🔓 Permitir nuevo registro (ej. cambio de ropa)")
@@ -611,6 +589,17 @@ with tab1:
 
 with tab2: 
     st.header("Lavadero")
+    
+    # NUEVA SECCIÓN: LISTA DE SUCIOS
+    dirty_list = df[df.apply(is_needs_wash, axis=1)]
+    st.subheader(f"🧺 Canasto de Ropa Sucia ({len(dirty_list)})")
+    if not dirty_list.empty:
+        st.dataframe(dirty_list[['Code', 'Category', 'Uses', 'Status']], use_container_width=True)
+    else:
+        st.info("Todo impecable ✨")
+
+    st.divider()
+
     with st.container(border=True):
         col_input, col_btn = st.columns([3, 1])
         with col_input:
@@ -670,12 +659,16 @@ with tab5:
     st.header("📊 Estadísticas Completas")
     if not df.empty:
         total_items = len(df)
-        dirty_items = df[df['Status'].isin(['Sucio', 'Lavando'])]
-        count_dirty = len(dirty_items)
-        count_clean = total_items - count_dirty
-        rate_dirty = count_dirty / total_items if total_items > 0 else 0
-        st.caption("🧺 Estado del Lavadero")
-        st.progress(rate_dirty, text=f"Suciedad: {int(rate_dirty*100)}% ({count_clean} Limpias | {count_dirty} Sucias)")
+        
+        # Corrección: Contamos como sucias también las que pasaron el límite
+        items_needs_wash = df[df.apply(is_needs_wash, axis=1)]
+        count_dirty_real = len(items_needs_wash)
+        count_clean_real = total_items - count_dirty_real
+        
+        rate_dirty = count_dirty_real / total_items if total_items > 0 else 0
+        st.caption("🧺 Estado del Lavadero (Real)")
+        st.progress(rate_dirty, text=f"Suciedad: {int(rate_dirty*100)}% ({count_clean_real} Limpias | {count_dirty_real} Sucias)")
+        
     st.divider()
     c_s1, c_s2 = st.columns(2)
     with c_s1:
@@ -773,11 +766,9 @@ with tab6:
         
         if packable.empty: st.error("¡No tenés ropa limpia para viajar!")
         else:
-            # 1. Definir Cantidades (Lógica de Lavandería)
             USE_LAUNDRY = False
             if num_days > 7:
                 USE_LAUNDRY = True
-                # Llevamos ropa para 5-6 días y lavamos
                 target_days = 6
                 st.toast("Viaje largo: Ajustando para lavar ropa allá 🧼")
             else:
@@ -788,24 +779,20 @@ with tab6:
             n_bots = (target_days // 2) + 1
             n_out = 2
 
-            # 2. Filtro Climático Inteligente
-            # Si tenemos datos del clima, filtramos lo que no sirve
             pool_tops = packable[packable['Category'].isin(['Remera', 'Camisa'])]
             pool_bots = packable[packable['Category'] == 'Pantalón']
             pool_outs = packable[packable['Category'].isin(['Campera', 'Buzo'])]
 
-            avg_max = st.session_state.get('travel_avg_max', 20) # Default 20 si no buscó clima
+            avg_max = st.session_state.get('travel_avg_max', 20) 
 
-            # FILTRADO DE VALIJA SEGÚN CLIMA
             if forecast:
-                if avg_max > 25: # CALOR: Sacar abrigo pesado y jeans gruesos
+                if avg_max > 25: 
                     pool_bots = pool_bots[~pool_bots['Code'].apply(lambda x: 'DL' in x or 'JE' in x)]
-                    pool_outs = pool_outs[pool_outs['Code'].apply(lambda x: '04' not in x and '05' not in x)] # Sacar camperas muy gruesas
-                elif avg_max < 15: # FRIO: Sacar shorts y musculosas
+                    pool_outs = pool_outs[pool_outs['Code'].apply(lambda x: '04' not in x and '05' not in x)] 
+                elif avg_max < 15: 
                     pool_bots = pool_bots[~pool_bots['Code'].apply(lambda x: 'SH' in x or 'DC' in x)]
                     pool_tops = pool_tops[~pool_tops['Code'].apply(lambda x: '00' in x)]
 
-            # Selección
             tops = pool_tops.sample(min(len(pool_tops), n_tops))
             bots = pool_bots.sample(min(len(pool_bots), n_bots))
             outs = pool_outs.sample(min(len(pool_outs), n_out))
