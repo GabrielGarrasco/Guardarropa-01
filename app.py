@@ -459,8 +459,7 @@ with st.sidebar:
                                 st.image(cargar_imagen_desde_url(img), width=80) 
                             else: 
                                 st.write(f"🏷️ {code}")
-                        else:
-                            st.write(f"{code}")
+                       
                 
                 c1, c2 = st.columns(2)
                 with c1: show_mini(last['Top'], "Top")
