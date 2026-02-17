@@ -391,11 +391,20 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v15.1 - AI Enabled 🧠")
+st.sidebar.caption("v15.2 - Smart AI 🧠")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
 code_occ = user_occ[0]
+
+# >>>>>> LÓGICA DE LIMPIEZA DE MANUALES AL CAMBIAR DE OCASIÓN <<<<<<
+if 'last_occ_viewed' not in st.session_state: st.session_state['last_occ_viewed'] = code_occ
+
+# Si la ocasión seleccionada AHORA es distinta a la ÚLTIMA VISTA:
+if st.session_state['last_occ_viewed'] != code_occ:
+    st.session_state['custom_overrides'] = {} # Borramos los manuales (000000000, etc)
+    st.session_state['last_occ_viewed'] = code_occ # Actualizamos la referencia
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 if 'inventory' not in st.session_state: 
     with st.spinner("Cargando sistema..."):
@@ -717,8 +726,6 @@ with tab2:
         with col_input:
             with st.form("quick_wash_form", clear_on_submit=True):
                 code_input = st.text_input("Ingresar Código")
-                
-                # --- MODIFICADO: BOTONES LADO A LADO ---
                 col_b1, col_b2 = st.columns(2)
                 with col_b1:
                     btn_lavar = st.form_submit_button("🧼 Lavar", use_container_width=True)
@@ -729,7 +736,6 @@ with tab2:
                     code_clean = code_input.strip().upper()
                     if code_clean in df['Code'].values:
                         idx = df[df['Code'] == code_clean].index[0]
-                        
                         if btn_lavar:
                             df.at[idx, 'Status'] = 'Lavando'
                             df.at[idx, 'Uses'] = 0
@@ -738,15 +744,12 @@ with tab2:
                             save_data_gsheet(df)
                             st.success(f"✅ {code_clean} lavando.")
                             st.rerun()
-                        
                         elif btn_sucio:
                             df.at[idx, 'Status'] = 'Sucio'
-                            # Mantenemos los usos actuales, solo cambiamos estado para que entre al canasto
                             st.session_state['inventory'] = df
                             save_data_gsheet(df)
                             st.toast(f"🧺 {code_clean} marcada como sucia.")
                             st.rerun()
-                            
                     elif btn_lavar or btn_sucio:
                         st.error("❌ Código no existe.")
 
