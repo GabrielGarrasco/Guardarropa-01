@@ -9,21 +9,20 @@ from PIL import Image
 from io import BytesIO
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import random
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v12.0", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v13.0", layout="centered", page_icon="🧥")
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
 def get_google_sheet_client():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        # Accedemos a los secretos configurados en Streamlit Cloud
         creds_dict = dict(st.secrets["service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         return client
     except Exception as e:
-        # Si falla (ej. localmente sin secrets), devolvemos None para no romper la app
         return None
 
 def load_data_gsheet():
@@ -136,7 +135,7 @@ def get_weather_open_meteo():
     except:
         return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error Conexión"}
 
-# --- FUNCIONES NUEVAS PARA VIAJE (CLIMA DESTINO) ---
+# --- FUNCIONES VIAJE ---
 def get_city_coords(city_name):
     try:
         url = f"https://geocoding-api.open-meteo.com/v1/search?name={city_name}&count=1&language=es&format=json"
@@ -162,7 +161,7 @@ def get_weather_emoji(code):
     if code >= 95: return "⚡"
     return "☁️"
 
-# --- LÓGICA LAVADERO Y RECOMENDACIÓN ---
+# --- LÓGICA DE NEGOCIO ---
 def check_laundry_timers(df):
     updated = False
     now = datetime.now()
@@ -178,9 +177,24 @@ def check_laundry_timers(df):
                 df.at[idx, 'LaundryStart'] = now.isoformat(); updated = True
     return df, updated
 
+def is_item_usable(row):
+    # Verifica si la prenda está limpia y NO ha superado su límite de uso
+    if row['Status'] != 'Limpio': return False
+    sna = decodificar_sna(row['Code'])
+    if not sna: return True
+    limit = get_limit_for_item(row['Category'], sna)
+    try:
+        uses = int(float(row['Uses'])) if row['Uses'] not in ['', 'nan'] else 0
+        if uses >= limit: return False # BLOQUEO ESTRICTO
+    except: pass
+    return True
+
 def recommend_outfit(df, weather, occasion, seed):
-    clean = df[df['Status'] == 'Limpio'].copy()
-    if clean.empty: return pd.DataFrame(), 0
+    # 1. Filtro estricto de usabilidad (Limpio y con vida útil)
+    usable_df = df[df.apply(is_item_usable, axis=1)].copy()
+    
+    if usable_df.empty: return pd.DataFrame(), 0
+    
     blacklist = set()
     try:
         fb = load_feedback_gsheet()
@@ -191,7 +205,7 @@ def recommend_outfit(df, weather, occasion, seed):
             blacklist = set(rej['Top'].dropna().tolist() + rej['Bottom'].dropna().tolist() + rej['Outer'].dropna().tolist())
     except: pass
     
-    t_feel = weather.get('feels_like', weather['temp']) + 3
+    t_feel = weather.get('feels_like', weather['temp']) + 3 # Ajuste personal
     t_max = weather.get('max', weather['temp']) + 3
     t_min = weather.get('min', weather['temp']) + 3
     final = []
@@ -202,10 +216,13 @@ def recommend_outfit(df, weather, occasion, seed):
 
     def get_best(cats, ess=True):
         curr_s = get_current_season()
-        pool = clean[(clean['Category'].isin(cats)) & (clean['Occasion'].isin(target_occasions)) & ((clean['Season'] == curr_s) | (clean['Season'] == 'T'))]
+        # Filtro base: Categoría, Ocasión y Temporada (actual o Todo el año)
+        pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occasions)) & ((usable_df['Season'] == curr_s) | (usable_df['Season'] == 'T'))]
         
-        if pool.empty: pool = clean[(clean['Category'].isin(cats)) & (clean['Occasion'].isin(target_occasions))]
-        if pool.empty and ess: pool = clean[clean['Category'].isin(cats)]
+        # Fallback si no hay de temporada exacta
+        if pool.empty: pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occasions))]
+        # Fallback de emergencia
+        if pool.empty and ess: pool = usable_df[usable_df['Category'].isin(cats)]
         if pool.empty: return None
         
         cands = []
@@ -213,19 +230,29 @@ def recommend_outfit(df, weather, occasion, seed):
             sna = decodificar_sna(r['Code'])
             if not sna: continue
             match = False
+            
+            # --- REGLAS CLIMÁTICAS AJUSTADAS ---
             if r['Category'] == 'Pantalón':
                 attr = sna['attr']
-                if t_max > 28:
-                    if attr in ['Sh', 'DC']: match = True
-                    elif t_feel < 24 and attr in ['Je', 'DL']: match = True
-                elif t_feel > 20: match = True
-                else: 
-                    if attr in ['Je', 'Ve', 'DL']: match = True
+                if t_max > 25: # Hace calor -> Prohibido Jean pesado
+                    if attr in ['Sh', 'DC', 'Ve']: match = True
+                    elif attr == 'DL': match = False # Deportivo Largo da calor
+                    elif attr == 'Je': match = False # Jean da calor
+                elif t_feel < 15: # Hace frio -> Prohibido Cortos
+                    if attr in ['Je', 'DL']: match = True
+                else: # Clima medio
+                    match = True
+            
             elif r['Category'] in ['Remera', 'Camisa']:
                 attr = sna['attr']
-                if t_max > 30 and attr in ['00', '01']: match = True
-                elif t_feel < 18 and attr == '02': match = True
-                else: match = True
+                # Si hace mucho calor (>30), priorizar sin mangas o cortas
+                if t_max > 30:
+                    if attr in ['00', '01']: match = True
+                elif t_feel < 18: # Fresco -> Manga larga
+                    if attr == '02': match = True
+                else: 
+                    match = True
+
             elif r['Category'] in ['Campera', 'Buzo']:
                 try:
                     lvl = int(sna['attr'])
@@ -233,11 +260,26 @@ def recommend_outfit(df, weather, occasion, seed):
                     elif t_min < 16 and lvl in [2, 3]: match = True
                     elif t_min < 22 and lvl == 1: match = True
                 except: pass
+                
             if match: cands.append(r)
         
         f_pool = pd.DataFrame(cands) if cands else pool
+        
+        # Eliminar items rechazados hoy
         nb = f_pool[~f_pool['Code'].isin(blacklist)]
-        return nb.sample(1, random_state=seed).iloc[0] if not nb.empty else f_pool.sample(1, random_state=seed).iloc[0]
+        
+        # --- LÓGICA DE ROTACIÓN ---
+        # Si hay opciones, ordenar por LastWorn (los que hace más tiempo no uso primero)
+        # Convertimos LastWorn a fecha, los NaT/Vacíos se consideran muy viejos (buenos para usar)
+        if not nb.empty:
+            nb['LastWornDate'] = pd.to_datetime(nb['LastWorn'], errors='coerce').fillna(pd.Timestamp('2000-01-01'))
+            # Ordenamos ascendente (los más viejos arriba) y tomamos el top 3 para aleatoriedad
+            nb = nb.sort_values('LastWornDate', ascending=True)
+            candidates = nb.head(3) 
+            return candidates.sample(1, random_state=seed).iloc[0] # Random entre los 3 menos usados
+        else:
+             # Si no hay candidatos limpios no baneados, devolvemos del pool general (aunque ya se haya usado recientemente)
+             return f_pool.sample(1, random_state=seed).iloc[0]
 
     top = get_best(['Remera', 'Camisa']); 
     if top is not None: final.append(top)
@@ -249,7 +291,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v12.0 - Clima & Viajes")
+st.sidebar.caption("v13.0 - Smart Travel & Laundry")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -258,7 +300,7 @@ code_occ = user_occ[0]
 if 'inventory' not in st.session_state: 
     with st.spinner("Cargando sistema..."):
         st.session_state['inventory'] = load_data_gsheet()
-if 'seed' not in st.session_state: st.session_state['seed'] = 42
+if 'seed' not in st.session_state: st.session_state['seed'] = random.randint(1, 1000) # Seed aleatoria al inicio para variedad
 if 'custom_overrides' not in st.session_state: st.session_state['custom_overrides'] = {}
 if 'change_mode' not in st.session_state: st.session_state['change_mode'] = False
 if 'confirm_stage' not in st.session_state: st.session_state['confirm_stage'] = 0 
@@ -272,7 +314,7 @@ if updated:
 df = st.session_state['inventory']
 weather = get_weather_open_meteo()
 
-# --- VISOR SIDEBAR INTELIGENTE ---
+# --- VISOR SIDEBAR ---
 with st.sidebar:
     st.divider()
     with st.expander("🕴️ Estado: " + code_occ, expanded=True):
@@ -311,10 +353,6 @@ with st.sidebar:
                         show_mini(last['Outer'], "Out")
                 else:
                     st.warning(f"⚠️ Sin registrar {code_occ} hoy")
-                    match_hist_occ = accepted[accepted['Occasion'] == code_occ]
-                    if not match_hist_occ.empty:
-                        last_hist = match_hist_occ.iloc[-1]
-                        st.caption(f"Último {code_occ}: {last_hist['Date']}")
             
             if not found_outfit_for_occ and not ya_registrado_hoy:
                 st.info(f"Esperando selección para {code_occ}...")
@@ -325,8 +363,10 @@ with st.sidebar:
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Viaje"])
 
 with tab1:
+    # Generar recomendación
     recs_df, temp_calculada = recommend_outfit(df, weather, code_occ, st.session_state['seed'])
 
+    # Aplicar overrides manuales
     for cat_key, code_val in st.session_state['custom_overrides'].items():
         if code_val and code_val in df['Code'].values:
             manual_item = df[df['Code'] == code_val].iloc[0]
@@ -346,7 +386,11 @@ with tab1:
     with col_h2: 
         c_btn1, c_btn2 = st.columns(2)
         if c_btn1.button("🔄 Cambiar", use_container_width=True): 
-            st.session_state['change_mode'] = not st.session_state['change_mode']; st.session_state['custom_overrides'] = {}; st.rerun()
+            # Cambiamos seed para randomizar y limpiamos overrides
+            st.session_state['seed'] = random.randint(1, 1000)
+            st.session_state['change_mode'] = not st.session_state['change_mode']
+            st.session_state['custom_overrides'] = {}
+            st.rerun()
         if c_btn2.button("🛠️ Manual", use_container_width=True):
             st.session_state['show_custom_ui'] = not st.session_state.get('show_custom_ui', False)
 
@@ -383,7 +427,7 @@ with tab1:
                 st.markdown(f"**{item['Category']}**")
                 st.caption(f"Code: `{item['Code']}`")
                 st.progress(health, text=f"Vida: {uses}/{limit}")
-                if health < 0.25: st.warning("⚠️ Lavar pronto")
+                if health == 0: st.error("⚠️ AL LIMITE: Lavar") # Indicador visual extra
                 return item
             else: st.info("🤷‍♂️ N/A"); return None
 
@@ -409,8 +453,12 @@ with tab1:
                 if st.button("🎲 Dame otra opción"):
                     ra = n_abr + 1 if n_abr is not None else 3
                     entry = {'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada, 'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 'Rating_Abrigo': ra, 'Rating_Comodidad': 3, 'Rating_Seguridad': 3, 'Action': 'Rejected'}
-                    save_feedback_entry_gsheet(entry); st.session_state['seed'] += 1; st.session_state['change_mode'] = False; st.rerun()
+                    save_feedback_entry_gsheet(entry)
+                    st.session_state['seed'] = random.randint(1, 1000) # Nueva seed
+                    st.session_state['change_mode'] = False
+                    st.rerun()
         else:
+            # FLUJO DE CONFIRMACIÓN
             if st.session_state['confirm_stage'] == 0:
                 st.markdown("### ⭐ Calificación del día")
                 
@@ -464,6 +512,7 @@ with tab1:
 
                 st.divider()
 
+                # BOTONES DE REGISTRO
                 if ya_registrado_hoy:
                     st.success(f"✅ Ya registraste un outfit para '{code_occ}' hoy.")
                     force_register = st.checkbox("🔓 Permitir nuevo registro (ej. cambio de ropa)")
@@ -543,7 +592,6 @@ with tab1:
                                 'Bot_Abrigo': v_rb_a, 'Bot_Comodidad': v_rb_c, 'Bot_Flow': v_rb_f,
                                 'Out_Abrigo': v_ro_a, 'Out_Comodidad': v_ro_c, 'Out_Flow': v_ro_f
                             }
-                            
                             save_feedback_entry_gsheet(entry); st.toast("¡Outfit registrado!"); st.rerun()
 
             elif st.session_state['confirm_stage'] == 1:
@@ -559,7 +607,7 @@ with tab1:
                         idx = df[df['Code'] == alert['code']].index[0]
                         curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
                         df.at[idx, 'Uses'] = curr + 1; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d"); save_data_gsheet(df); st.session_state['confirm_stage'] = 0; st.session_state['alerts_buffer'] = []; st.rerun()
-    else: st.error("No hay ropa limpia disponible.")
+    else: st.error("No hay ropa limpia disponible (según filtros). ¡Lavá algo!")
 
 with tab2: 
     st.header("Lavadero")
@@ -620,53 +668,40 @@ with tab4:
 
 with tab5:
     st.header("📊 Estadísticas Completas")
-
     if not df.empty:
         total_items = len(df)
         dirty_items = df[df['Status'].isin(['Sucio', 'Lavando'])]
         count_dirty = len(dirty_items)
         count_clean = total_items - count_dirty
-        
         rate_dirty = count_dirty / total_items if total_items > 0 else 0
-        
         st.caption("🧺 Estado del Lavadero")
         st.progress(rate_dirty, text=f"Suciedad: {int(rate_dirty*100)}% ({count_clean} Limpias | {count_dirty} Sucias)")
-    
     st.divider()
-
     c_s1, c_s2 = st.columns(2)
-    
     with c_s1:
         st.subheader("🔥 Top 5 Más Usadas")
         if not df.empty:
             df['Uses'] = pd.to_numeric(df['Uses'], errors='coerce').fillna(0)
             top_5 = df.sort_values(by='Uses', ascending=False).head(5)
             st.dataframe(top_5[['Code', 'Category', 'Uses']], hide_index=True, use_container_width=True)
-
     with c_s2:
         st.subheader("👻 Prendas Muertas")
         st.caption(">90 días sin uso")
-        
         def is_dead_stock(row):
             if row['Status'] != 'Limpio': return False
-            # Si no tiene fecha, asumimos que es NUEVA y no la mostramos en "Muertas"
             if pd.isna(row['LastWorn']) or str(row['LastWorn']) in ['', 'nan', 'None']: return False
             try:
                 last_date = datetime.fromisoformat(str(row['LastWorn']))
                 if (datetime.now() - last_date).days > 90: return True
             except: return False
             return False
-
         dead_df = df[df.apply(is_dead_stock, axis=1)]
         if not dead_df.empty:
             st.dataframe(dead_df[['Category', 'Code']], hide_index=True, use_container_width=True)
         else:
             st.success("¡Rotación impecable!")
-
     st.divider()
-
     c_f1, c_f2 = st.columns(2)
-
     with c_f1:
         st.subheader("⭐ Ranking Flow")
         try:
@@ -676,37 +711,33 @@ with tab5:
                 cols_rate = ['Rating_Abrigo', 'Rating_Comodidad', 'Rating_Seguridad']
                 for c in cols_rate: accepted[c] = pd.to_numeric(accepted[c], errors='coerce').fillna(3)
                 accepted['Score'] = accepted[cols_rate].mean(axis=1)
-                
                 melted = accepted.melt(id_vars=['Score'], value_vars=['Top', 'Bottom', 'Outer'], value_name='Code').dropna()
                 melted = melted[~melted['Code'].isin(['N/A', 'nan', ''])]
                 ranking = melted.groupby('Code')['Score'].mean().reset_index().sort_values(by='Score', ascending=False).head(5)
                 ranking = ranking.merge(df[['Code', 'Category', 'ImageURL']], on='Code', how='left')
-                
                 st.dataframe(ranking[['Category', 'Score']], hide_index=True, use_container_width=True)
             else: st.info("Falta feedback.")
         except: st.error("Error en Flow.")
-
     with c_f2:
         st.subheader("📈 Tendencia Histórica")
         try:
             fb = load_feedback_gsheet()
             if not fb.empty:
-                fb['Avg_Score'] = (pd.to_numeric(fb['Rating_Abrigo'], errors='coerce') + 
-                                   pd.to_numeric(fb['Rating_Comodidad'], errors='coerce') + 
-                                   pd.to_numeric(fb['Rating_Seguridad'], errors='coerce')) / 3
+                fb['Avg_Score'] = (pd.to_numeric(fb['Rating_Abrigo'], errors='coerce') + pd.to_numeric(fb['Rating_Comodidad'], errors='coerce') + pd.to_numeric(fb['Rating_Seguridad'], errors='coerce')) / 3
                 fb['Day'] = fb['Date'].astype(str).str.slice(0, 10)
                 daily_trend = fb.groupby('Day')['Avg_Score'].mean()
                 st.line_chart(daily_trend)
         except: st.info("Sin datos.")
 
 with tab6:
-    st.header("✈️ Modo Viaje v2.1") 
+    st.header("✈️ Modo Viaje v3.0 (Smart)") 
     
     col_dest, col_days = st.columns([2, 1])
     with col_dest: dest_city = st.text_input("📍 Destino", value="Buenos Aires")
-    with col_days: num_days = st.number_input("📅 Días", min_value=1, max_value=14, value=3)
+    with col_days: num_days = st.number_input("📅 Días", min_value=1, max_value=30, value=5)
 
-    # --- SECCIÓN NUEVA DE CLIMA ---
+    if 'travel_weather' not in st.session_state: st.session_state['travel_weather'] = None
+
     if st.button("🔍 Analizar Clima Destino", use_container_width=True):
         with st.spinner(f"Consultando satélite para {dest_city}..."):
             lat, lon, country = get_city_coords(dest_city)
@@ -714,8 +745,8 @@ with tab6:
                 forecast = get_travel_forecast(lat, lon)
                 if forecast:
                     st.info(f"✅ Pronóstico encontrado para: {dest_city}, {country}")
+                    st.session_state['travel_weather'] = forecast
                     
-                    # Mostrar pronóstico simplificado
                     dias = forecast['time'][:num_days]
                     maxs = forecast['temperature_2m_max'][:num_days]
                     mins = forecast['temperature_2m_min'][:num_days]
@@ -723,52 +754,73 @@ with tab6:
                     
                     cols_weather = st.columns(len(dias) if len(dias) < 5 else 5)
                     avg_min = sum(mins) / len(mins)
-                    
+                    avg_max = sum(maxs) / len(maxs)
+                    st.session_state['travel_avg_max'] = avg_max
+
                     for i, (d, mx, mn, c) in enumerate(zip(dias, maxs, mins, codes)):
-                        # Mostrar solo hasta 5 días para que entre en pantalla
                         if i < 5:
                             with cols_weather[i]:
                                 day_name = datetime.strptime(d, "%Y-%m-%d").strftime("%d/%m")
                                 st.metric(label=f"{get_weather_emoji(c)} {day_name}", value=f"{int(mx)}°", delta=f"{int(mn)}° min")
-
-                    # Consejo automático basado en la mínima promedio
-                    if avg_min < 10:
-                        st.warning("❄️ **Alerta de Frío:** La mínima promedio es baja. ¡Llevá campera gruesa (Nivel 4/5)!")
-                    elif avg_min < 18:
-                        st.info("🧥 **Fresco:** Ideal para buzos o camperas livianas.")
-                    else:
-                        st.success("☀️ **Calorcito:** Ropa liviana y protector solar.")
-                else:
-                    st.error("No se pudo obtener el clima.")
-            else:
-                st.error("Ciudad no encontrada. Probá agregando el país (ej: 'Cordoba, Argentina').")
+                else: st.error("No se pudo obtener el clima.")
+            else: st.error("Ciudad no encontrada.")
     
     st.divider()
 
     if st.button("🎒 Generar Propuesta de Valija", type="primary", use_container_width=True):
         packable = df[df['Status'] == 'Limpio']
+        forecast = st.session_state.get('travel_weather')
+        
         if packable.empty: st.error("¡No tenés ropa limpia para viajar!")
         else:
-            # Lógica simple de cantidades
-            n_tops = num_days + 1
-            n_bots = (num_days // 2) + 1
-            n_out = 2 # Default
-            
-            tops = packable[packable['Category'].isin(['Remera', 'Camisa'])]
-            if len(tops) > n_tops: tops = tops.sample(n_tops)
-            
-            bots = packable[packable['Category'] == 'Pantalón']
-            if len(bots) > n_bots: bots = bots.sample(n_bots)
-            
-            outs = packable[packable['Category'].isin(['Campera', 'Buzo'])]
-            if len(outs) > n_out: outs = outs.sample(n_out)
+            # 1. Definir Cantidades (Lógica de Lavandería)
+            USE_LAUNDRY = False
+            if num_days > 7:
+                USE_LAUNDRY = True
+                # Llevamos ropa para 5-6 días y lavamos
+                target_days = 6
+                st.toast("Viaje largo: Ajustando para lavar ropa allá 🧼")
+            else:
+                target_days = num_days
+                st.toast("Viaje corto: Llevando ropa para todos los días")
+
+            n_tops = target_days + 1
+            n_bots = (target_days // 2) + 1
+            n_out = 2
+
+            # 2. Filtro Climático Inteligente
+            # Si tenemos datos del clima, filtramos lo que no sirve
+            pool_tops = packable[packable['Category'].isin(['Remera', 'Camisa'])]
+            pool_bots = packable[packable['Category'] == 'Pantalón']
+            pool_outs = packable[packable['Category'].isin(['Campera', 'Buzo'])]
+
+            avg_max = st.session_state.get('travel_avg_max', 20) # Default 20 si no buscó clima
+
+            # FILTRADO DE VALIJA SEGÚN CLIMA
+            if forecast:
+                if avg_max > 25: # CALOR: Sacar abrigo pesado y jeans gruesos
+                    pool_bots = pool_bots[~pool_bots['Code'].apply(lambda x: 'DL' in x or 'JE' in x)]
+                    pool_outs = pool_outs[pool_outs['Code'].apply(lambda x: '04' not in x and '05' not in x)] # Sacar camperas muy gruesas
+                elif avg_max < 15: # FRIO: Sacar shorts y musculosas
+                    pool_bots = pool_bots[~pool_bots['Code'].apply(lambda x: 'SH' in x or 'DC' in x)]
+                    pool_tops = pool_tops[~pool_tops['Code'].apply(lambda x: '00' in x)]
+
+            # Selección
+            tops = pool_tops.sample(min(len(pool_tops), n_tops))
+            bots = pool_bots.sample(min(len(pool_bots), n_bots))
+            outs = pool_outs.sample(min(len(pool_outs), n_out))
             
             st.session_state['travel_pack'] = pd.concat([tops, bots, outs])
+            st.session_state['travel_laundry_needed'] = USE_LAUNDRY
             st.session_state['travel_selections'] = {} 
             st.rerun() 
 
     if st.session_state.get('travel_pack') is not None:
         pack = st.session_state['travel_pack']
+        
+        if st.session_state.get('travel_laundry_needed'):
+            st.info("ℹ️ **Modo Lavandería Activo:** Vas por muchos días, así que calculé una valija compacta. Vas a tener que lavar ropa a mitad del viaje.")
+
         st.divider()
         st.subheader(f"🧳 Tu Valija ({len(pack)} prendas)")
         
@@ -799,7 +851,7 @@ with tab6:
             st.session_state['travel_pack'] = None; st.session_state['travel_selections'] = {}; st.rerun()
 
     st.divider()
-    with st.expander("📋 Checklist de Supervivencia (No olvidar)", expanded=False):
+    with st.expander("📋 Checklist de Supervivencia", expanded=False):
         essentials = ["DNI / Pasaporte", "Cargador", "Cepillo Dientes", "Desodorante", "Auriculares", "Medicamentos", "Lentes", "Billetera"]
         cols_ch = st.columns(2)
         for i, item in enumerate(essentials): cols_ch[i % 2].checkbox(item, key=f"check_{i}")
