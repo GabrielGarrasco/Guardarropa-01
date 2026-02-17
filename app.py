@@ -430,14 +430,46 @@ with st.sidebar:
             if not fb.empty and 'Action' in fb.columns:
                 accepted = fb[fb['Action'] == 'Accepted'].copy()
                 accepted['Date'] = accepted['Date'].astype(str)
-                match_today_occ = accepted[
-                    (accepted['Date'].str.contains(today_str, na=False)) & 
-                    (accepted['Occasion'] == code_occ)
-                ]
+                # --- CORRECCIÓN INICIO ---
+            if not match_today_occ.empty:
+                # Si hay algo registrado ESPECÍFICAMENTE para la ocasión seleccionada, lo mostramos
+                last = match_today_occ.iloc[-1]
+                st.success(f"✅ Registrado ({code_occ})")
+                found_outfit_for_occ = True
+            else:
+                # Si NO hay match con la ocasión, buscamos CUALQUIER cosa registrada hoy
+                # para que sepas qué ropa tienes puesta aunque cambies el menú.
+                match_any_today = accepted[accepted['Date'].str.contains(today_str, na=False)]
+                
+                if not match_any_today.empty:
+                    last = match_any_today.iloc[-1] # Tomamos el último registro del día
+                    st.info(f"🕴️ Tienes puesto: ({last['Occasion']})") # Avisamos que es de otra ocasión
+                    found_outfit_for_occ = True
+                else:
+                    last = None
 
-                if not match_today_occ.empty:
-                    last = match_today_occ.iloc[-1]
-                    st.success(f"✅ Registrado ({code_occ})")
+            if found_outfit_for_occ and last is not None:
+                def show_mini(code, label):
+                    if code and code != 'N/A' and code != 'nan':
+                        row = df[df['Code'] == code]
+                        if not row.empty:
+                            img = row.iloc[0]['ImageURL']
+                            # Verificación extra para evitar errores de imagen vacía
+                            if img and len(str(img)) > 5:
+                                st.image(cargar_imagen_desde_url(img), width=80) 
+                            else: 
+                                st.write(f"🏷️ {code}")
+                        else:
+                            st.write(f"{code}")
+                
+                c1, c2 = st.columns(2)
+                with c1: show_mini(last['Top'], "Top")
+                with c2: show_mini(last['Bottom'], "Bot")
+                if last['Outer'] and last['Outer'] != 'N/A': show_mini(last['Outer'], "Out")
+            
+            else:
+                st.warning("⚠️ Nada registrado hoy")
+            # --- CORRECCIÓN FIN ---
                     found_outfit_for_occ = True
                     
                     def show_mini(code, label):
