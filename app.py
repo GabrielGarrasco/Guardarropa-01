@@ -752,6 +752,40 @@ with tab2:
                             st.rerun()
                     elif btn_lavar or btn_sucio:
                         st.error("❌ Código no existe.")
+    
+    # >>> SECCION NUEVA AGREGADA AQUI ABAJO <<<
+    with st.expander("🛠️ Quitar/Agregar Uso Manual"):
+        c_u_input, c_u_btns = st.columns([2, 2])
+        with c_u_input:
+            code_mod = st.text_input("Código para modif. usos", key="cmd_uses")
+        with c_u_btns:
+            b_add = st.button("➕ Sumar Uso", use_container_width=True)
+            b_sub = st.button("➖ Restar Uso", use_container_width=True)
+
+        if code_mod:
+            clean_code = code_mod.strip().upper()
+            if clean_code in df['Code'].values:
+                idx = df[df['Code'] == clean_code].index[0]
+                current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
+
+                if b_add:
+                    df.at[idx, 'Uses'] = current_uses + 1
+                    df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
+                    st.session_state['inventory'] = df
+                    save_data_gsheet(df)
+                    st.toast(f"📈 {clean_code}: Usos subidos a {current_uses + 1}")
+                    st.rerun()
+
+                if b_sub:
+                    new_uses = max(0, current_uses - 1)
+                    df.at[idx, 'Uses'] = new_uses
+                    st.session_state['inventory'] = df
+                    save_data_gsheet(df)
+                    st.toast(f"📉 {clean_code}: Usos bajados a {new_uses}")
+                    st.rerun()
+            elif b_add or b_sub:
+                st.error("Código no encontrado")
+    # >>> FIN SECCION NUEVA <<<
 
     edited_laundry = st.data_editor(df[['Code', 'Category', 'Status', 'Uses']], key="ed_lav", column_config={"Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True)}, hide_index=True, disabled=["Code", "Category", "Uses"], use_container_width=True)
     if st.button("🔄 Actualizar Planilla"):
