@@ -99,7 +99,7 @@ def cargar_imagen_desde_url(url):
 
 def decodificar_sna(codigo):
     try:
-        # CORREGIDO: Quitamos .upper() para respetar mayúsculas/minúsculas (ej: Sh)
+        # CORREGIDO: Quitamos .upper() para respetar mayúsculas/minúsculas
         c = str(codigo).strip()
         if len(c) < 4: return None
         season = c[0]
@@ -356,7 +356,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v15.3 - Smart AI (Fix Case) 🧠")
+st.sidebar.caption("v15.4 - Smart AI (Fixed) 🧠")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -800,6 +800,7 @@ with tab5:
     with c_s2:
         st.subheader("👻 Prendas Muertas")
         st.caption(">90 días sin uso")
+        # --- CORREGIDO AQUÍ: Se asegura que la función siempre retorne True o False ---
         def is_dead_stock(row):
             if row['Status'] != 'Limpio': return False
             if pd.isna(row['LastWorn']) or str(row['LastWorn']) in ['', 'nan', 'None']: return False
@@ -807,6 +808,7 @@ with tab5:
                 last_date = datetime.fromisoformat(str(row['LastWorn']))
                 if (datetime.now() - last_date).days > 90: return True
             except: return False
+            return False # <--- ESTO FALTABA PARA EVITAR EL ERROR
         dead_df = df[df.apply(is_dead_stock, axis=1)]
         if not dead_df.empty: st.dataframe(dead_df[['Category', 'Code']], hide_index=True, use_container_width=True)
         else: st.success("¡Rotación impecable!")
