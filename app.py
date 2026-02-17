@@ -717,13 +717,39 @@ with tab2:
         with col_input:
             with st.form("quick_wash_form", clear_on_submit=True):
                 code_input = st.text_input("Ingresar Código")
-                if st.form_submit_button("🧼 Lavar", use_container_width=True) and code_input:
+                
+                # --- MODIFICADO: BOTONES LADO A LADO ---
+                col_b1, col_b2 = st.columns(2)
+                with col_b1:
+                    btn_lavar = st.form_submit_button("🧼 Lavar", use_container_width=True)
+                with col_b2:
+                    btn_sucio = st.form_submit_button("🗑️ Sucio", use_container_width=True)
+                
+                if code_input:
                     code_clean = code_input.strip().upper()
                     if code_clean in df['Code'].values:
                         idx = df[df['Code'] == code_clean].index[0]
-                        df.at[idx, 'Status'] = 'Lavando'; df.at[idx, 'Uses'] = 0; df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
-                        st.session_state['inventory'] = df; save_data_gsheet(df); st.success(f"✅ {code_clean} lavando."); st.rerun()
-                    else: st.error("❌ Código no existe.")
+                        
+                        if btn_lavar:
+                            df.at[idx, 'Status'] = 'Lavando'
+                            df.at[idx, 'Uses'] = 0
+                            df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
+                            st.session_state['inventory'] = df
+                            save_data_gsheet(df)
+                            st.success(f"✅ {code_clean} lavando.")
+                            st.rerun()
+                        
+                        elif btn_sucio:
+                            df.at[idx, 'Status'] = 'Sucio'
+                            # Mantenemos los usos actuales, solo cambiamos estado para que entre al canasto
+                            st.session_state['inventory'] = df
+                            save_data_gsheet(df)
+                            st.toast(f"🧺 {code_clean} marcada como sucia.")
+                            st.rerun()
+                            
+                    elif btn_lavar or btn_sucio:
+                        st.error("❌ Código no existe.")
+
     edited_laundry = st.data_editor(df[['Code', 'Category', 'Status', 'Uses']], key="ed_lav", column_config={"Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True)}, hide_index=True, disabled=["Code", "Category", "Uses"], use_container_width=True)
     if st.button("🔄 Actualizar Planilla"):
         df.update(edited_laundry)
