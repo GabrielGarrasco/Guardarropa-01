@@ -1,8 +1,9 @@
 streamlit
 pandas
-gspread
-oauth2client
+requests
 pytz
 Pillow
-requests
-pip install scikit-learn
+gspread
+oauth2client
+scikit-learn
+numpy
