@@ -99,7 +99,8 @@ def cargar_imagen_desde_url(url):
 
 def decodificar_sna(codigo):
     try:
-        c = str(codigo).strip().upper()
+        # CORREGIDO: Quitamos .upper() para respetar mayúsculas/minúsculas (ej: Sh)
+        c = str(codigo).strip()
         if len(c) < 4: return None
         season = c[0]
         if len(c) > 2 and c[1:3] == 'CS': tipo = 'CS'; idx = 3
@@ -114,10 +115,9 @@ def get_limit_for_item(category, sna):
     elif category in ['Remera', 'Camisa']: return LIMITES_USO.get(sna['tipo'], 1)
     return LIMITES_USO.get(sna['tipo'], 3)
 
-# --- CLIMA LOCAL (MODIFICADO: DATA HORARIA) ---
+# --- CLIMA LOCAL ---
 def get_weather_open_meteo():
     try:
-        # Pedimos hourly=temperature_2m para calcular horas de frío
         url = "https://api.open-meteo.com/v1/forecast?latitude=-32.8908&longitude=-68.8272&current=temperature_2m,apparent_temperature,weather_code&daily=temperature_2m_max,temperature_2m_min&hourly=temperature_2m&timezone=auto"
         res = requests.get(url).json()
         
@@ -171,29 +171,21 @@ def get_weather_emoji(code):
     return "☁️"
 
 # --- LÓGICA DE NEGOCIO E INTELIGENCIA ---
-
-# >>> NUEVO: CEREBRO IA PARA CALCULAR PUNTAJE <<<
 def calculate_smart_score(item_code, current_temp, feedback_df):
-    """Calcula puntaje basado en historial y clima."""
     base_score = 50.0 
     if feedback_df.empty: return base_score
 
-    # Filtrar historial de ESTA prenda
     cols_to_check = [c for c in ['Top', 'Bottom', 'Outer'] if c in feedback_df.columns]
     if not cols_to_check: return base_score
     
-    # Busca donde aparece el código en cualquiera de las columnas
     mask = pd.Series(False, index=feedback_df.index)
     for col in cols_to_check:
         mask |= (feedback_df[col] == item_code)
     
     history = feedback_df[mask]
-
     if history.empty: return base_score
 
-    # 1. FACTOR GUSTO
     try:
-        # Convertimos a numérico por si acaso
         s_val = pd.to_numeric(history['Rating_Seguridad'], errors='coerce').mean()
         c_val = pd.to_numeric(history['Rating_Comodidad'], errors='coerce').mean()
         avg_rating = (s_val + c_val) / 2
@@ -201,7 +193,6 @@ def calculate_smart_score(item_code, current_temp, feedback_df):
         if pd.isna(gusto_score): gusto_score = 50
     except: gusto_score = 50
 
-    # 2. FACTOR CLIMA
     try:
         history['Rating_Comodidad'] = pd.to_numeric(history['Rating_Comodidad'], errors='coerce')
         history['Temp_Real'] = pd.to_numeric(history['Temp_Real'], errors='coerce')
@@ -216,7 +207,6 @@ def calculate_smart_score(item_code, current_temp, feedback_df):
             weather_score = 50
     except: weather_score = 50
 
-    # 60% Clima, 40% Gusto
     return (gusto_score * 0.4) + (weather_score * 0.6)
 
 def is_item_usable(row):
@@ -244,7 +234,6 @@ def recommend_outfit(df, weather, occasion, seed):
     usable_df = df[df.apply(is_item_usable, axis=1)].copy()
     if usable_df.empty: return pd.DataFrame(), 0, ""
     
-    # 1. Lista negra (rechazos de hoy)
     blacklist = set()
     try:
         fb = load_feedback_gsheet()
@@ -253,29 +242,26 @@ def recommend_outfit(df, weather, occasion, seed):
             fb['Date'] = fb['Date'].astype(str)
             rej = fb[(fb['Date'].str.contains(today, na=False)) & (fb['Action'] == 'Rejected')]
             blacklist = set(rej['Top'].dropna().tolist() + rej['Bottom'].dropna().tolist() + rej['Outer'].dropna().tolist())
-    except: 
-        fb = pd.DataFrame() # Fallback vacío si falla carga
+    except: fb = pd.DataFrame()
     
     t_curr = weather['temp']
     t_max = weather['max']
     t_min = weather['min']
-    t_feel = weather.get('feels_like', t_curr) + 3 # Ajuste personal
+    t_feel = weather.get('feels_like', t_curr) + 3 
     
     final = []
     
-    # 2. Análisis Horario para Abrigo
     coat_msg = ""
     needs_coat = False
     
     hourly_temps = weather.get('hourly_temp', [])
     hourly_times = weather.get('hourly_time', [])
     
-    UMBRAL_FRIO = 18 # Menos de esto sugiere abrigo
+    UMBRAL_FRIO = 18 
     
     if hourly_temps and hourly_times:
         hours_cold = []
         now_date = get_mendoza_time().date()
-        
         for t, time_str in zip(hourly_temps, hourly_times):
             try:
                 dt_hour = datetime.fromisoformat(time_str)
@@ -288,10 +274,8 @@ def recommend_outfit(df, weather, occasion, seed):
             needs_coat = True
             start_h = min(hours_cold)
             end_h = max(hours_cold)
-            if len(hours_cold) >= 12:
-                coat_msg = "❄️ Usar abrigo todo el día."
-            else:
-                coat_msg = f"🕒 Abrigo necesario de {start_h}:00 a {end_h}:00 hs"
+            if len(hours_cold) >= 12: coat_msg = "❄️ Usar abrigo todo el día."
+            else: coat_msg = f"🕒 Abrigo necesario de {start_h}:00 a {end_h}:00 hs"
         else:
             coat_msg = "☀️ No hace falta abrigo hoy."
             needs_coat = False
@@ -302,7 +286,6 @@ def recommend_outfit(df, weather, occasion, seed):
     def get_best(cats, category_type):
         curr_s = get_current_season()
         pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occasions)) & ((usable_df['Season'] == curr_s) | (usable_df['Season'] == 'T'))]
-        
         if pool.empty: pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occasions))]
         if pool.empty: pool = usable_df[usable_df['Category'].isin(cats)]
         if pool.empty: return None
@@ -313,7 +296,6 @@ def recommend_outfit(df, weather, occasion, seed):
             if not sna: continue
             match = False
             
-            # --- LÓGICA PANTALONES ---
             if category_type == 'bot':
                 attr = sna['attr']
                 if t_max > 27: 
@@ -324,7 +306,6 @@ def recommend_outfit(df, weather, occasion, seed):
                     elif attr in ['Sh', 'DC']: match = False
                 else: match = True 
             
-            # --- LÓGICA SUPERIOR ---
             elif category_type == 'top':
                 attr = sna['attr']
                 if t_max > 30: 
@@ -333,7 +314,6 @@ def recommend_outfit(df, weather, occasion, seed):
                     if attr == '02': match = True
                 else: match = True
 
-            # --- LÓGICA ABRIGO ---
             elif category_type == 'out':
                 if not needs_coat: match = False 
                 else:
@@ -347,35 +327,20 @@ def recommend_outfit(df, weather, occasion, seed):
             
             if match: cands.append(r)
         
-        # Filtramos blacklist
         f_pool = pd.DataFrame(cands) if cands else pool
         nb = f_pool[~f_pool['Code'].isin(blacklist)]
-        
         candidates_df = nb if not nb.empty else f_pool
         if candidates_df.empty: return None
 
-        # >>> AQUÍ SE APLICA LA INTELIGENCIA (LRU + SCORING) <<<
         try:
-            # 1. Ordenamos por LRU (Last Recently Used) primero
             candidates_df['LastWornDate'] = pd.to_datetime(candidates_df['LastWorn'], errors='coerce').fillna(pd.Timestamp('2000-01-01'))
-            # Tomamos el TOP 50% más antiguo para asegurar rotación
             candidates_df = candidates_df.sort_values('LastWornDate', ascending=True)
             top_lru_count = max(1, int(len(candidates_df) * 0.5))
             final_candidates = candidates_df.head(top_lru_count).copy()
-
-            # 2. Calculamos Smart Score para esos candidatos
-            final_candidates['AI_Score'] = final_candidates['Code'].apply(
-                lambda x: calculate_smart_score(x, t_curr, fb)
-            )
-            
-            # 3. Agregamos Ruido aleatorio (+/- 10 pts) para variedad
+            final_candidates['AI_Score'] = final_candidates['Code'].apply(lambda x: calculate_smart_score(x, t_curr, fb))
             final_candidates['Final_Score'] = final_candidates['AI_Score'] + final_candidates.apply(lambda x: random.uniform(-10, 10), axis=1)
-            
-            # 4. Ganador
             return final_candidates.sort_values('Final_Score', ascending=False).iloc[0]
-
-        except Exception as e:
-            # Fallback a aleatorio si falla la IA
+        except:
             return candidates_df.sample(1, random_state=seed).iloc[0]
 
     top = get_best(['Remera', 'Camisa'], 'top'); 
@@ -391,20 +356,16 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v15.2 - Smart AI 🧠")
+st.sidebar.caption("v15.3 - Smart AI (Fix Case) 🧠")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
 code_occ = user_occ[0]
 
-# >>>>>> LÓGICA DE LIMPIEZA DE MANUALES AL CAMBIAR DE OCASIÓN <<<<<<
 if 'last_occ_viewed' not in st.session_state: st.session_state['last_occ_viewed'] = code_occ
-
-# Si la ocasión seleccionada AHORA es distinta a la ÚLTIMA VISTA:
 if st.session_state['last_occ_viewed'] != code_occ:
-    st.session_state['custom_overrides'] = {} # Borramos los manuales (000000000, etc)
-    st.session_state['last_occ_viewed'] = code_occ # Actualizamos la referencia
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    st.session_state['custom_overrides'] = {}
+    st.session_state['last_occ_viewed'] = code_occ
 
 if 'inventory' not in st.session_state: 
     with st.spinner("Cargando sistema..."):
@@ -418,14 +379,12 @@ if 'alerts_buffer' not in st.session_state: st.session_state['alerts_buffer'] = 
 df = st.session_state['inventory']
 weather = get_weather_open_meteo()
 
-# --- SIDEBAR STATUS (MODIFICADO) ---
+# --- SIDEBAR STATUS ---
 with st.sidebar:
     st.divider()
     with st.expander("🕴️ Estado", expanded=True):
         try:
             fb = load_feedback_gsheet()
-            
-            # Variables de control
             last = None
             found_outfit = False
             today_str = get_mendoza_time().strftime("%Y-%m-%d")
@@ -434,74 +393,57 @@ with st.sidebar:
                 accepted = fb[fb['Action'] == 'Accepted'].copy()
                 accepted['Date'] = accepted['Date'].astype(str)
                 
-                # 1. Intento de Match Exacto con Ocasión Seleccionada
-                match_today_occ = accepted[
-                    (accepted['Date'].str.contains(today_str, na=False)) & 
-                    (accepted['Occasion'] == code_occ)
-                ]
+                match_today_occ = accepted[(accepted['Date'].str.contains(today_str, na=False)) & (accepted['Occasion'] == code_occ)]
 
                 if not match_today_occ.empty:
                     last = match_today_occ.iloc[-1]
                     st.success(f"✅ Registrado ({code_occ})")
                     found_outfit = True
                 else:
-                    # 2. Intento de Match con CUALQUIER cosa de hoy (Fallback)
                     match_any_today = accepted[accepted['Date'].str.contains(today_str, na=False)]
                     if not match_any_today.empty:
                         last = match_any_today.iloc[-1]
                         st.info(f"🕴️ Tienes puesto: ({last['Occasion']})")
                         found_outfit = True
 
-                # Renderizado de la ropa si se encontró algo
                 if found_outfit and last is not None:
                     def show_mini(code, label):
                         if code and code != 'N/A' and code != 'nan':
                             row = df[df['Code'] == code]
                             if not row.empty:
                                 img = row.iloc[0]['ImageURL']
-                                if img and len(str(img)) > 5:
-                                    st.image(cargar_imagen_desde_url(img), width=80)
-                                else:
-                                    st.write(f"🏷️ {code}")
-                            else:
-                                st.write(f"{code}")
+                                if img and len(str(img)) > 5: st.image(cargar_imagen_desde_url(img), width=80)
+                                else: st.write(f"🏷️ {code}")
+                            else: st.write(f"{code}")
                     
                     c1, c2 = st.columns(2)
                     with c1: show_mini(last['Top'], "Top")
                     with c2: show_mini(last['Bottom'], "Bot")
                     if last['Outer'] and last['Outer'] != 'N/A': show_mini(last['Outer'], "Out")
-                else:
-                    st.warning("⚠️ Nada registrado hoy")
-            else:
-                st.warning("Sin datos.")
-        except Exception as e:
-            st.warning("Sin datos.")
+                else: st.warning("⚠️ Nada registrado hoy")
+            else: st.warning("Sin datos.")
+        except Exception as e: st.warning("Sin datos.")
 
 # --- TABS ---
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Viaje"])
 
 with tab1:
-    # --- LOGICA DE OUTFIT FIJO DEL DIA ---
     today_str = get_mendoza_time().strftime("%Y-%m-%d")
     outfit_of_the_day = None
     
-    # Si NO estamos forzando un cambio, buscamos si ya elegimos algo hoy
     if not st.session_state['change_mode']:
         try:
             fb = load_feedback_gsheet()
             if not fb.empty and 'Action' in fb.columns:
                 accepted = fb[fb['Action'] == 'Accepted']
                 accepted['Date'] = accepted['Date'].astype(str)
-                # Buscamos coincidencias con la fecha de hoy Y la ocasion actual
                 match = accepted[(accepted['Date'].str.contains(today_str, na=False)) & (accepted['Occasion'] == code_occ)]
-                if not match.empty:
-                    outfit_of_the_day = match.iloc[-1] # El ultimo aceptado
+                if not match.empty: outfit_of_the_day = match.iloc[-1]
         except: pass
 
     coat_advice = ""
     
     if outfit_of_the_day is not None:
-        # CASO A: YA ELEGISTE ROPA HOY -> MOSTRAR ESA FIJA
         st.success(f"✅ Esta es tu prenda de hoy para '{code_occ}'")
         st.info("Ya registraste este outfit. Para generar uno nuevo, toca 'Cambiar'.")
         
@@ -512,14 +454,10 @@ with tab1:
         
         recs_df = df[df['Code'].isin(codes_to_show)]
         temp_calculada = float(outfit_of_the_day['User_Adj_Temp'])
-        # Calculamos solo el mensaje del abrigo actual
         _, _, coat_advice = recommend_outfit(df, weather, code_occ, 0)
-        
     else:
-        # CASO B: GENERAR NUEVO
         recs_df, temp_calculada, coat_advice = recommend_outfit(df, weather, code_occ, st.session_state['seed'])
 
-    # --- OVERRIDES MANUALES ---
     for cat_key, code_val in st.session_state['custom_overrides'].items():
         if code_val:
             if code_val == "000000000":
@@ -538,8 +476,7 @@ with tab1:
         col_w1.metric("Clima", f"{weather['temp']}°C", weather['desc'])
         col_w2.metric("Sensación", f"{weather['feels_like']}°C", f"Max: {weather['max']}°")
         col_w3.metric("Perfil", f"{temp_calculada:.1f}°C", "+3°C adj")
-        if coat_advice:
-            st.markdown(f"**{coat_advice}**")
+        if coat_advice: st.markdown(f"**{coat_advice}**")
 
     col_h1, col_h2 = st.columns([2, 2])
     with col_h1: st.subheader("Tu Outfit")
@@ -547,7 +484,7 @@ with tab1:
         c_btn1, c_btn2 = st.columns(2)
         if c_btn1.button("🔄 Cambiar", use_container_width=True): 
             st.session_state['seed'] = random.randint(1, 1000)
-            st.session_state['change_mode'] = True # Forzar modo cambio
+            st.session_state['change_mode'] = True 
             st.session_state['custom_overrides'] = {}
             st.rerun()
         if c_btn2.button("🛠️ Manual", use_container_width=True):
@@ -563,9 +500,10 @@ with tab1:
                 new_out = cc3.text_input("Abrigo", placeholder="Code...")
                 if st.form_submit_button("Aplicar"):
                     overrides = {}
-                    if new_top.strip(): overrides['top'] = new_top.strip().upper()
-                    if new_bot.strip(): overrides['bot'] = new_bot.strip().upper()
-                    if new_out.strip(): overrides['out'] = new_out.strip().upper()
+                    # CORREGIDO: Quitamos .upper()
+                    if new_top.strip(): overrides['top'] = new_top.strip()
+                    if new_bot.strip(): overrides['bot'] = new_bot.strip()
+                    if new_out.strip(): overrides['out'] = new_out.strip()
                     st.session_state['custom_overrides'] = overrides; st.session_state['show_custom_ui'] = False; st.rerun()
 
     rec_top, rec_bot, rec_out = None, None, None
@@ -602,7 +540,6 @@ with tab1:
 
         st.divider()
 
-        # Si estamos en modo CAMBIO (o no hay outfit fijo), mostramos feedback negativo para cambiar
         if st.session_state['change_mode']:
             st.info("¿Qué no te convenció?")
             with st.container(border=True):
@@ -615,18 +552,13 @@ with tab1:
                     entry = {'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada, 'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 'Rating_Abrigo': ra, 'Rating_Comodidad': 3, 'Rating_Seguridad': 3, 'Action': 'Rejected'}
                     save_feedback_entry_gsheet(entry)
                     st.session_state['seed'] = random.randint(1, 1000) 
-                    st.session_state['change_mode'] = True # Seguir cambiando
+                    st.session_state['change_mode'] = True 
                     st.rerun()
         
-        # Si NO hay outfit del dia (o estamos forzando), mostramos calificacion POSITIVA
-        # Si YA HAY outfit del dia, ocultamos esto (salvo que quieras volver a calificar, pero por simpleza lo oculto)
         if outfit_of_the_day is None or st.session_state['change_mode']:
             if st.session_state['confirm_stage'] == 0:
                 st.markdown("### ⭐ Confirmar y Calificar")
-                
-                def show_gradient_bar():
-                    st.markdown('<div style="background: linear-gradient(90deg, #3b82f6 0%, #ffffff 50%, #ef4444 100%); height: 8px; border-radius: 4px; margin-bottom: 5px; opacity: 0.8;"></div>', unsafe_allow_html=True)
-
+                def show_gradient_bar(): st.markdown('<div style="background: linear-gradient(90deg, #3b82f6 0%, #ffffff 50%, #ef4444 100%); height: 8px; border-radius: 4px; margin-bottom: 5px; opacity: 0.8;"></div>', unsafe_allow_html=True)
                 st.caption("Outfit Completo")
                 c_fb1, c_fb2, c_fb3 = st.columns(3)
                 with c_fb1: 
@@ -638,7 +570,6 @@ with tab1:
 
                 st.divider()
                 st.markdown("### 🧥 Detalle por Prenda")
-                
                 rt_abr, rt_com, rt_flow = 4, None, None
                 if rec_top and rec_top != "N/A":
                     st.markdown(f"**Top:** `{rec_top}`")
@@ -704,7 +635,7 @@ with tab1:
                             v_rb_a = rb_abr; v_rb_c = rb_com + 1 if rb_com is not None else 3; v_rb_f = rb_flow + 1 if rb_flow is not None else 3
                             v_ro_a = ro_abr; v_ro_c = ro_com + 1 if ro_com is not None else 3; v_ro_f = ro_flow + 1 if ro_flow is not None else 3
                             st.session_state['custom_overrides'] = {} 
-                            st.session_state['change_mode'] = False # Apagamos el modo cambio
+                            st.session_state['change_mode'] = False
                             
                             entry = {
                                 'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 
@@ -749,14 +680,13 @@ with tab2:
             with st.form("quick_wash_form", clear_on_submit=True):
                 code_input = st.text_input("Ingresar Código")
                 col_b1, col_b2 = st.columns(2)
-                with col_b1:
-                    btn_lavar = st.form_submit_button("🧼 Lavar", use_container_width=True)
-                with col_b2:
-                    btn_sucio = st.form_submit_button("🗑️ Sucio", use_container_width=True)
+                with col_b1: btn_lavar = st.form_submit_button("🧼 Lavar", use_container_width=True)
+                with col_b2: btn_sucio = st.form_submit_button("🗑️ Sucio", use_container_width=True)
                 
                 if code_input:
+                    # CORREGIDO: Quitamos .upper()
                     code_clean = code_input.strip()
-                    if code_clean in df['Code'].values:
+                    if code_clean in df['Code'].astype(str).values:
                         idx = df[df['Code'] == code_clean].index[0]
                         if btn_lavar:
                             df.at[idx, 'Status'] = 'Lavando'
@@ -775,7 +705,6 @@ with tab2:
                     elif btn_lavar or btn_sucio:
                         st.error("❌ Código no existe.")
     
-    # >>> SECCION NUEVA AGREGADA AQUI ABAJO <<<
     with st.expander("🛠️ Quitar/Agregar Uso Manual"):
         c_u_input, c_u_btns = st.columns([2, 2])
         with c_u_input:
@@ -785,8 +714,9 @@ with tab2:
             b_sub = st.button("➖ Restar Uso", use_container_width=True)
 
         if code_mod:
-            clean_code = code_mod.strip().upper()
-            if clean_code in df['Code'].values:
+            # CORREGIDO: Quitamos .upper()
+            clean_code = code_mod.strip()
+            if clean_code in df['Code'].astype(str).values:
                 idx = df[df['Code'] == clean_code].index[0]
                 current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
 
@@ -806,8 +736,7 @@ with tab2:
                     st.toast(f"📉 {clean_code}: Usos bajados a {new_uses}")
                     st.rerun()
             elif b_add or b_sub:
-                st.error("Código no encontrado")
-    # >>> FIN SECCION NUEVA <<<
+                st.error(f"Código '{clean_code}' no encontrado.")
 
     edited_laundry = st.data_editor(df[['Code', 'Category', 'Status', 'Uses']], key="ed_lav", column_config={"Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True)}, hide_index=True, disabled=["Code", "Category", "Uses"], use_container_width=True)
     if st.button("🔄 Actualizar Planilla"):
@@ -878,7 +807,6 @@ with tab5:
                 last_date = datetime.fromisoformat(str(row['LastWorn']))
                 if (datetime.now() - last_date).days > 90: return True
             except: return False
-            return False
         dead_df = df[df.apply(is_dead_stock, axis=1)]
         if not dead_df.empty: st.dataframe(dead_df[['Category', 'Code']], hide_index=True, use_container_width=True)
         else: st.success("¡Rotación impecable!")
