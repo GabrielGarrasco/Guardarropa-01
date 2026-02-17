@@ -351,13 +351,26 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero",
 with tab1:
     recs_df, temp_calculada = recommend_outfit(df, weather, code_occ, st.session_state['seed'])
 
+    # --- NUEVO BLOQUE: Manejo de Overrides y Código "Sin Prenda" ---
     for cat_key, code_val in st.session_state['custom_overrides'].items():
-        if code_val and code_val in df['Code'].values:
-            manual_item = df[df['Code'] == code_val].iloc[0]
-            if manual_item['Category'] in ['Remera', 'Camisa']: recs_df = recs_df[~recs_df['Category'].isin(['Remera', 'Camisa'])]
-            elif manual_item['Category'] == 'Pantalón': recs_df = recs_df[recs_df['Category'] != 'Pantalón']
-            elif manual_item['Category'] in ['Campera', 'Buzo']: recs_df = recs_df[~recs_df['Category'].isin(['Campera', 'Buzo'])]
-            recs_df = pd.concat([recs_df, manual_item.to_frame().T], ignore_index=True)
+        if code_val:
+            # CASO A: El usuario eligió NO usar prenda (Código 000000000)
+            if code_val == "000000000":
+                # Eliminamos la categoría sugerida del DataFrame de recomendaciones
+                if cat_key == 'top': recs_df = recs_df[~recs_df['Category'].isin(['Remera', 'Camisa'])]
+                elif cat_key == 'bot': recs_df = recs_df[recs_df['Category'] != 'Pantalón']
+                elif cat_key == 'out': recs_df = recs_df[~recs_df['Category'].isin(['Campera', 'Buzo'])]
+                # No agregamos nada nuevo, quedando el hueco vacío.
+
+            # CASO B: El usuario eligió una prenda específica del inventario
+            elif code_val in df['Code'].values:
+                manual_item = df[df['Code'] == code_val].iloc[0]
+                # Limpiamos la categoría anterior para reemplazarla
+                if manual_item['Category'] in ['Remera', 'Camisa']: recs_df = recs_df[~recs_df['Category'].isin(['Remera', 'Camisa'])]
+                elif manual_item['Category'] == 'Pantalón': recs_df = recs_df[recs_df['Category'] != 'Pantalón']
+                elif manual_item['Category'] in ['Campera', 'Buzo']: recs_df = recs_df[~recs_df['Category'].isin(['Campera', 'Buzo'])]
+                # Agregamos la manual
+                recs_df = pd.concat([recs_df, manual_item.to_frame().T], ignore_index=True)
 
     with st.container(border=True):
         col_w1, col_w2, col_w3 = st.columns(3)
@@ -379,7 +392,7 @@ with tab1:
 
     if st.session_state.get('show_custom_ui', False):
         with st.container(border=True):
-            st.markdown("###### ✍️ Ingresá el código:")
+            st.markdown("###### ✍️ Ingresá el código (o `000000000` para ir sin nada):")
             with st.form("custom_outfit_form"):
                 cc1, cc2, cc3 = st.columns(3)
                 new_top = cc1.text_input("Torso", placeholder="Code...")
