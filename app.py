@@ -66,18 +66,19 @@ def save_feedback_entry_gsheet(entry):
         sheet.append_row(row)
     except: pass
 
-# --- LÍMITES Y FUNCIONES (MODIFICADOS PARA PERFIL HIGIENE ALTA) ---
-# Se redujeron drásticamente los usos antes de lavar
+# --- CONSTANTES REDEFINIDAS (MODO ESTRICTO DE HIGIENE) ---
 LIMITES_USO = {
-    "Je": 3,  # Jeans: Antes 6, ahora 3
-    "Ve": 2,  # Vestir: Antes 4, ahora 2
-    "DL": 2,  # Deportivo Largo: Antes 3, ahora 2
-    "DC": 1,  # Deportivo Corto: 1 uso (sudor garantizado)
-    "Sh": 1,  # Short: 1 uso
-    "R": 1,   # Remera: 1 uso (Fundamental para quien transpira)
-    "CS": 2,  # Camisa: Antes 3, ahora 2
-    "B": 3,   # Buzo: Antes 5, ahora 3
-    "C": 5    # Campera (Outer): Se mantiene alto pq no toca piel
+    "R": 2,   # Remeras: Contacto directo -> 2 usos (Antes 1)
+    "Sh": 2,  # Shorts: Contacto directo -> 2 usos (Antes 1)
+    "DC": 2,  # Deportivo Corto: Sudor -> 2 usos (Antes 1)
+    "Je": 4,  # Jeans: Resistente -> 4 usos (Antes 3)
+    "B": 4,   # Buzos: Segunda capa -> 4 usos (Antes 3)
+    "CS": 1,  # Camisas: Higiene estricta -> 1 uso (Antes 2)
+    
+    # Mantienen valores estándar o previos si no se especificaron cambios
+    "Ve": 2,  # Vestir
+    "DL": 2,  # Deportivo Largo
+    "C": 5    # Campera (Outer)
 }
 
 def get_mendoza_time():
@@ -493,40 +494,65 @@ with tab1:
 
                 st.divider()
 
+                # --- LÓGICA DE REGISTRO UNIFICADA ---
+                allow_register = True
+                force_mode = False
+                
                 if ya_registrado_hoy:
                     st.success(f"✅ Ya registraste un outfit para '{code_occ}' hoy.")
-                    force_register = st.checkbox("🔓 Permitir nuevo registro (ej. cambio de ropa)")
-                    if not force_register:
-                        st.button("✅ Registrar Uso", disabled=True, key="btn_disabled")
-                    else:
-                        is_sweat = st.checkbox("💦 Transpiración Alta (Mandar todo a lavar)")
-                        if st.button("✅ Registrar Uso (Forzado)", type="primary", use_container_width=True):
-                            alerts = []
+                    allow_register = st.checkbox("🔓 Permitir nuevo registro (ej. cambio de ropa)")
+                    force_mode = allow_register
+
+                if allow_register:
+                    # CHECKBOX "BOTÓN DE PÁNICO"
+                    is_sweat = st.checkbox("💦 Transpiración Alta (Mandar todo a lavar)")
+                    
+                    btn_text = "✅ Registrar Uso (Forzado)" if force_mode else "✅ Registrar Uso"
+                    
+                    if st.button(btn_text, type="primary", use_container_width=True):
+                        # 1. ¿TRANSPIRACIÓN ALTA? -> BYPASS DE TODO, A LAVAR DIRECTO
+                        if is_sweat:
                             for item in selected_items_codes:
-                                if is_sweat:
-                                    # Si transpira, no importa el limite, se ensucia
-                                    pass 
-                                else:
-                                    idx = df[df['Code'] == item['Code']].index[0]
-                                    sna = decodificar_sna(item['Code'])
-                                    limit = get_limit_for_item(item['Category'], sna)
-                                    current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
-                                    if (current_uses + 1) > limit: alerts.append({'code': item['Code'], 'cat': item['Category'], 'uses': current_uses, 'limit': limit})
+                                idx = df[df['Code'] == item['Code']].index[0]
+                                df.at[idx, 'Status'] = 'Sucio'
+                                df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
                             
-                            if alerts: st.session_state['alerts_buffer'] = alerts; st.session_state['confirm_stage'] = 1; st.rerun()
+                            # Guardamos y notificamos
+                            st.session_state['inventory'] = df
+                            save_data_gsheet(df)
+                            st.toast("💦 Ropa enviada a lavar por transpiración.")
+                            st.rerun()
+
+                        # 2. LÓGICA ESTÁNDAR (Si no hay transpiración excesiva)
+                        else:
+                            alerts = []
+                            # Chequeo de límites
+                            for item in selected_items_codes:
+                                idx = df[df['Code'] == item['Code']].index[0]
+                                sna = decodificar_sna(item['Code'])
+                                limit = get_limit_for_item(item['Category'], sna)
+                                current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
+                                if (current_uses + 1) > limit: 
+                                    alerts.append({'code': item['Code'], 'cat': item['Category'], 'uses': current_uses, 'limit': limit})
+                            
+                            # Si hay alertas, detenemos el proceso y mostramos confirmación
+                            if alerts:
+                                st.session_state['alerts_buffer'] = alerts
+                                st.session_state['confirm_stage'] = 1
+                                st.rerun()
+                            
+                            # Si no hay alertas, procedemos al registro normal
                             else:
                                 for item in selected_items_codes:
                                     idx = df[df['Code'] == item['Code']].index[0]
-                                    if is_sweat:
-                                        # Lógica Sweat: Marca sucio directo
-                                        df.at[idx, 'Status'] = 'Sucio'
-                                        df.at[idx, 'Uses'] = 0 # O dejarlo lleno, pero sucio es lo importante
-                                        df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
-                                    else:
-                                        curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
-                                        df.at[idx, 'Uses'] = curr + 1
-                                        df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
-                                st.session_state['inventory'] = df; save_data_gsheet(df)
+                                    curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
+                                    df.at[idx, 'Uses'] = curr + 1
+                                    df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
+
+                                st.session_state['inventory'] = df
+                                save_data_gsheet(df)
+                                
+                                # Guardar Feedback
                                 ra = r_abrigo
                                 rc = r_comodidad + 1 if r_comodidad is not None else 3
                                 rs = r_seguridad + 1 if r_seguridad is not None else 3
@@ -534,69 +560,23 @@ with tab1:
                                 v_rb_a = rb_abr; v_rb_c = rb_com + 1 if rb_com is not None else 3; v_rb_f = rb_flow + 1 if rb_flow is not None else 3
                                 v_ro_a = ro_abr; v_ro_c = ro_com + 1 if ro_com is not None else 3; v_ro_f = ro_flow + 1 if ro_flow is not None else 3
                                 st.session_state['custom_overrides'] = {} 
-                                entry = {'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada, 'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 'Rating_Abrigo': ra, 'Rating_Comodidad': rc, 'Rating_Seguridad': rs, 'Action': 'Accepted', 'Top_Abrigo': v_rt_a, 'Top_Comodidad': v_rt_c, 'Top_Flow': v_rt_f, 'Bot_Abrigo': v_rb_a, 'Bot_Comodidad': v_rb_c, 'Bot_Flow': v_rb_f, 'Out_Abrigo': v_ro_a, 'Out_Comodidad': v_ro_c, 'Out_Flow': v_ro_f}
-                                save_feedback_entry_gsheet(entry); st.toast("¡Outfit registrado!"); st.rerun()
-                else:
-                    # CHECKBOX MAGICO
-                    is_sweat = st.checkbox("💦 Transpiración Alta (Mandar todo a lavar)")
-                    
-                    if st.button("✅ Registrar Uso", type="primary", use_container_width=True):
-                        alerts = []
-                        for item in selected_items_codes:
-                            if is_sweat:
-                                # Si hay sudor, NO chequeamos limites, se va a lavar si o si
-                                pass
-                            else:
-                                idx = df[df['Code'] == item['Code']].index[0]
-                                sna = decodificar_sna(item['Code'])
-                                limit = get_limit_for_item(item['Category'], sna)
-                                current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
-                                if (current_uses + 1) > limit: alerts.append({'code': item['Code'], 'cat': item['Category'], 'uses': current_uses, 'limit': limit})
-                        
-                        if alerts: st.session_state['alerts_buffer'] = alerts; st.session_state['confirm_stage'] = 1; st.rerun()
-                        else:
-                            for item in selected_items_codes:
-                                idx = df[df['Code'] == item['Code']].index[0]
-                                if is_sweat:
-                                    # Lógica Sweat: Marca sucio directo
-                                    df.at[idx, 'Status'] = 'Sucio'
-                                    # df.at[idx, 'Uses'] = 99 # Opcional: llenar barra
-                                    df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
-                                else:
-                                    curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
-                                    df.at[idx, 'Uses'] = curr + 1
-                                    df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
-
-                            st.session_state['inventory'] = df; save_data_gsheet(df)
-                            
-                            ra = r_abrigo
-                            rc = r_comodidad + 1 if r_comodidad is not None else 3
-                            rs = r_seguridad + 1 if r_seguridad is not None else 3
-                            
-                            v_rt_a = rt_abr; v_rt_c = rt_com + 1 if rt_com is not None else 3; v_rt_f = rt_flow + 1 if rt_flow is not None else 3
-                            v_rb_a = rb_abr; v_rb_c = rb_com + 1 if rb_com is not None else 3; v_rb_f = rb_flow + 1 if rb_flow is not None else 3
-                            v_ro_a = ro_abr; v_ro_c = ro_com + 1 if ro_com is not None else 3; v_ro_f = ro_flow + 1 if ro_flow is not None else 3
-
-                            st.session_state['custom_overrides'] = {} 
-                            
-                            entry = {
-                                'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 
-                                'City': user_city, 
-                                'Temp_Real': weather['temp'], 
-                                'User_Adj_Temp': temp_calculada, 
-                                'Occasion': code_occ, 
-                                'Top': rec_top, 
-                                'Bottom': rec_bot, 
-                                'Outer': rec_out, 
-                                'Rating_Abrigo': ra, 
-                                'Rating_Comodidad': rc, 
-                                'Rating_Seguridad': rs, 
-                                'Action': 'Accepted',
-                                'Top_Abrigo': v_rt_a, 'Top_Comodidad': v_rt_c, 'Top_Flow': v_rt_f,
-                                'Bot_Abrigo': v_rb_a, 'Bot_Comodidad': v_rb_c, 'Bot_Flow': v_rb_f,
-                                'Out_Abrigo': v_ro_a, 'Out_Comodidad': v_ro_c, 'Out_Flow': v_ro_f
-                            }
-                            save_feedback_entry_gsheet(entry); st.toast("¡Outfit registrado!"); st.rerun()
+                                
+                                entry = {
+                                    'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 
+                                    'City': user_city, 
+                                    'Temp_Real': weather['temp'], 
+                                    'User_Adj_Temp': temp_calculada, 
+                                    'Occasion': code_occ, 
+                                    'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 
+                                    'Rating_Abrigo': ra, 'Rating_Comodidad': rc, 'Rating_Seguridad': rs, 
+                                    'Action': 'Accepted',
+                                    'Top_Abrigo': v_rt_a, 'Top_Comodidad': v_rt_c, 'Top_Flow': v_rt_f,
+                                    'Bot_Abrigo': v_rb_a, 'Bot_Comodidad': v_rb_c, 'Bot_Flow': v_rb_f,
+                                    'Out_Abrigo': v_ro_a, 'Out_Comodidad': v_ro_c, 'Out_Flow': v_ro_f
+                                }
+                                save_feedback_entry_gsheet(entry)
+                                st.toast("¡Outfit registrado!")
+                                st.rerun()
 
             elif st.session_state['confirm_stage'] == 1:
                 st.error("🚨 ¡Límite de uso alcanzado!")
