@@ -170,7 +170,55 @@ def get_weather_emoji(code):
     if code >= 51: return "☔"
     return "☁️"
 
-# --- LÓGICA DE NEGOCIO ---
+# --- LÓGICA DE NEGOCIO E INTELIGENCIA ---
+
+# >>> NUEVO: CEREBRO IA PARA CALCULAR PUNTAJE <<<
+def calculate_smart_score(item_code, current_temp, feedback_df):
+    """Calcula puntaje basado en historial y clima."""
+    base_score = 50.0 
+    if feedback_df.empty: return base_score
+
+    # Filtrar historial de ESTA prenda
+    cols_to_check = [c for c in ['Top', 'Bottom', 'Outer'] if c in feedback_df.columns]
+    if not cols_to_check: return base_score
+    
+    # Busca donde aparece el código en cualquiera de las columnas
+    mask = pd.Series(False, index=feedback_df.index)
+    for col in cols_to_check:
+        mask |= (feedback_df[col] == item_code)
+    
+    history = feedback_df[mask]
+
+    if history.empty: return base_score
+
+    # 1. FACTOR GUSTO
+    try:
+        # Convertimos a numérico por si acaso
+        s_val = pd.to_numeric(history['Rating_Seguridad'], errors='coerce').mean()
+        c_val = pd.to_numeric(history['Rating_Comodidad'], errors='coerce').mean()
+        avg_rating = (s_val + c_val) / 2
+        gusto_score = (avg_rating / 5) * 100
+        if pd.isna(gusto_score): gusto_score = 50
+    except: gusto_score = 50
+
+    # 2. FACTOR CLIMA
+    try:
+        history['Rating_Comodidad'] = pd.to_numeric(history['Rating_Comodidad'], errors='coerce')
+        history['Temp_Real'] = pd.to_numeric(history['Temp_Real'], errors='coerce')
+        good_history = history[history['Rating_Comodidad'] >= 3]
+        
+        if not good_history.empty:
+            avg_temp_usage = good_history['Temp_Real'].mean()
+            diff = abs(current_temp - avg_temp_usage)
+            weather_penalty = diff * 5 
+            weather_score = max(0, 100 - weather_penalty)
+        else:
+            weather_score = 50
+    except: weather_score = 50
+
+    # 60% Clima, 40% Gusto
+    return (gusto_score * 0.4) + (weather_score * 0.6)
+
 def is_item_usable(row):
     if row['Status'] != 'Limpio': return False
     sna = decodificar_sna(row['Code'])
@@ -205,7 +253,8 @@ def recommend_outfit(df, weather, occasion, seed):
             fb['Date'] = fb['Date'].astype(str)
             rej = fb[(fb['Date'].str.contains(today, na=False)) & (fb['Action'] == 'Rejected')]
             blacklist = set(rej['Top'].dropna().tolist() + rej['Bottom'].dropna().tolist() + rej['Outer'].dropna().tolist())
-    except: pass
+    except: 
+        fb = pd.DataFrame() # Fallback vacío si falla carga
     
     t_curr = weather['temp']
     t_max = weather['max']
@@ -228,10 +277,8 @@ def recommend_outfit(df, weather, occasion, seed):
         now_date = get_mendoza_time().date()
         
         for t, time_str in zip(hourly_temps, hourly_times):
-            # Parsear fecha hora (ISO format de open meteo)
             try:
                 dt_hour = datetime.fromisoformat(time_str)
-                # Solo analizamos horas del día de hoy
                 if dt_hour.date() == now_date:
                     if t < UMBRAL_FRIO:
                         hours_cold.append(dt_hour.hour)
@@ -266,34 +313,32 @@ def recommend_outfit(df, weather, occasion, seed):
             if not sna: continue
             match = False
             
-            # --- LÓGICA PANTALONES (Evitar Jeans con calor) ---
+            # --- LÓGICA PANTALONES ---
             if category_type == 'bot':
                 attr = sna['attr']
-                if t_max > 27: # Calor fuerte
+                if t_max > 27: 
                     if attr in ['Sh', 'DC', 'Ve']: match = True
-                    elif attr in ['Je', 'DL']: match = False # Prohibido por calor
-                elif t_max < 15: # Mucho frío
+                    elif attr in ['Je', 'DL']: match = False 
+                elif t_max < 15: 
                     if attr in ['Je', 'DL', 'Ve']: match = True
                     elif attr in ['Sh', 'DC']: match = False
-                else: match = True # Clima medio
+                else: match = True 
             
             # --- LÓGICA SUPERIOR ---
             elif category_type == 'top':
                 attr = sna['attr']
-                if t_max > 30: # Mucho calor
+                if t_max > 30: 
                     if attr in ['00', '01']: match = True
-                elif t_max < 18: # Frio
+                elif t_max < 18: 
                     if attr == '02': match = True
                 else: match = True
 
             # --- LÓGICA ABRIGO ---
             elif category_type == 'out':
-                if not needs_coat: 
-                    match = False # Si el análisis horario dice no, no sugerimos
+                if not needs_coat: match = False 
                 else:
                     try:
                         lvl = int(sna['attr'])
-                        # Usamos la mínima del día para decidir grosor
                         if t_min < 10 and lvl >= 3: match = True
                         elif t_min < 16 and lvl in [2, 3]: match = True
                         elif t_min < 22 and lvl == 1: match = True
@@ -302,15 +347,36 @@ def recommend_outfit(df, weather, occasion, seed):
             
             if match: cands.append(r)
         
+        # Filtramos blacklist
         f_pool = pd.DataFrame(cands) if cands else pool
         nb = f_pool[~f_pool['Code'].isin(blacklist)]
         
-        if not nb.empty:
-            nb['LastWornDate'] = pd.to_datetime(nb['LastWorn'], errors='coerce').fillna(pd.Timestamp('2000-01-01'))
-            nb = nb.sort_values('LastWornDate', ascending=True)
-            return nb.head(3).sample(1, random_state=seed).iloc[0] 
-        else:
-             return f_pool.sample(1, random_state=seed).iloc[0] if not f_pool.empty else None
+        candidates_df = nb if not nb.empty else f_pool
+        if candidates_df.empty: return None
+
+        # >>> AQUÍ SE APLICA LA INTELIGENCIA (LRU + SCORING) <<<
+        try:
+            # 1. Ordenamos por LRU (Last Recently Used) primero
+            candidates_df['LastWornDate'] = pd.to_datetime(candidates_df['LastWorn'], errors='coerce').fillna(pd.Timestamp('2000-01-01'))
+            # Tomamos el TOP 50% más antiguo para asegurar rotación
+            candidates_df = candidates_df.sort_values('LastWornDate', ascending=True)
+            top_lru_count = max(1, int(len(candidates_df) * 0.5))
+            final_candidates = candidates_df.head(top_lru_count).copy()
+
+            # 2. Calculamos Smart Score para esos candidatos
+            final_candidates['AI_Score'] = final_candidates['Code'].apply(
+                lambda x: calculate_smart_score(x, t_curr, fb)
+            )
+            
+            # 3. Agregamos Ruido aleatorio (+/- 10 pts) para variedad
+            final_candidates['Final_Score'] = final_candidates['AI_Score'] + final_candidates.apply(lambda x: random.uniform(-10, 10), axis=1)
+            
+            # 4. Ganador
+            return final_candidates.sort_values('Final_Score', ascending=False).iloc[0]
+
+        except Exception as e:
+            # Fallback a aleatorio si falla la IA
+            return candidates_df.sample(1, random_state=seed).iloc[0]
 
     top = get_best(['Remera', 'Camisa'], 'top'); 
     if top is not None: final.append(top)
@@ -325,7 +391,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v15.0 - Smart Schedule")
+st.sidebar.caption("v15.1 - AI Enabled 🧠")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
