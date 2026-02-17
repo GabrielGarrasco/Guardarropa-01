@@ -133,6 +133,31 @@ def get_weather_open_meteo():
     except:
         return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error Conexión"}
 
+def get_destination_weather(city):
+    try:
+        # 1. Buscamos las coordenadas (Lat/Lon) de la ciudad ingresada
+        geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1&language=es&format=json"
+        geo_res = requests.get(geo_url, timeout=3).json()
+        if "results" not in geo_res: return None
+        
+        lat = geo_res["results"][0]["latitude"]
+        lon = geo_res["results"][0]["longitude"]
+        country = geo_res["results"][0].get("country", "")
+        
+        # 2. Buscamos el pronóstico para esas coordenadas
+        wea_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=temperature_2m_max,temperature_2m_min&timezone=auto"
+        wea_res = requests.get(wea_url, timeout=3).json()
+        
+        if 'daily' not in wea_res: return None
+        
+        # Calculamos el promedio de máximas y mínimas de los próximos 3 días
+        daily = wea_res['daily']
+        max_temp = sum(daily['temperature_2m_max'][:3]) / len(daily['temperature_2m_max'][:3])
+        min_temp = sum(daily['temperature_2m_min'][:3]) / len(daily['temperature_2m_min'][:3])
+        
+        return {"max": round(max_temp), "min": round(min_temp), "country": country}
+    except:
+        return None
 def check_laundry_timers(df):
     updated = False
     now = datetime.now()
@@ -691,6 +716,17 @@ with tab6:
     col_dest, col_days = st.columns([2, 1])
     with col_dest: dest_city = st.text_input("📍 Destino", value="Buenos Aires")
     with col_days: num_days = st.number_input("📅 Días", min_value=1, max_value=30, value=3)
+
+    # ---> INICIO NUEVO BLOQUE DE CLIMA <---
+    if dest_city:
+        weather_dest = get_destination_weather(dest_city)
+        if weather_dest:
+            st.info(f"🌤️ **Pronóstico en {dest_city} ({weather_dest['country']}):** Máx {weather_dest['max']}°C | Mín {weather_dest['min']}°C")
+        else:
+            st.caption("⚠️ No se pudo obtener el pronóstico para esta ciudad.")
+    # ---> FIN NUEVO BLOQUE DE CLIMA <---
+
+    if st.button("🎒 Generar Propuesta de Valija", type="primary", use_container_width=True):
 
     if st.button("🎒 Generar Propuesta de Valija", type="primary", use_container_width=True):
         packable = df[df['Status'] == 'Limpio']
