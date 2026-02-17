@@ -5,3 +5,4 @@ oauth2client
 pytz
 Pillow
 requests
+pip install scikit-learn
