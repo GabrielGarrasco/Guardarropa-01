@@ -10,11 +10,128 @@ from io import BytesIO
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import random
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import LabelEncoder
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v15.0", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v16.0 AI", layout="centered", page_icon="🧥")
 
+# ==========================================
+# --- MOTOR DE INTELIGENCIA ARTIFICIAL (NUEVO) ---
+# ==========================================
+class OutfitAI:
+    def __init__(self):
+        self.model = None
+        self.le_occ = LabelEncoder()
+        self.le_cat = LabelEncoder()
+        self.is_trained = False
+
+    def train(self, feedback_df, inventory_df):
+        """Entrena el modelo con tu historial de feedback"""
+        # Necesitamos un mínimo de datos para que no tire error
+        if feedback_df.empty or len(feedback_df) < 5:
+            return False 
+        
+        try:
+            data = feedback_df.copy()
+            # Limpieza de datos
+            data['Temp_Real'] = pd.to_numeric(data['Temp_Real'], errors='coerce').fillna(20)
+            
+            # Calculamos el Score (Target) basado en tus estrellas
+            # Si rechazaste el outfit, el score es 0 (castigo fuerte)
+            data['Target_Score'] = data.apply(
+                lambda x: 0 if x['Action'] == 'Rejected' else 
+                ((float(x.get('Rating_Abrigo', 4)) + float(x.get('Rating_Comodidad', 3)) + float(x.get('Rating_Seguridad', 3))) / 15) * 100, 
+                axis=1
+            )
+
+            # Preparamos filas de entrenamiento (desarmamos el outfit en prendas individuales)
+            training_rows = []
+            for _, row in data.iterrows():
+                context_temp = row['Temp_Real']
+                context_occ = row['Occasion']
+                score = row['Target_Score']
+                
+                # Iteramos por las 3 piezas del outfit
+                for part in ['Top', 'Bottom', 'Outer']:
+                    code = row[part]
+                    if code and code not in ['N/A', 'nan', 'None', '']:
+                        # Buscamos la categoría real en el inventario
+                        cat_matches = inventory_df[inventory_df['Code'] == code]['Category'].values
+                        cat_val = cat_matches[0] if len(cat_matches) > 0 else 'Unknown'
+                        
+                        # Extraemos parte numérica del código para diferenciar items
+                        code_num = int(''.join(filter(str.isdigit, str(code)))) if any(c.isdigit() for c in str(code)) else 0
+
+                        training_rows.append({
+                            'Temp': context_temp,
+                            'Occasion': str(context_occ),
+                            'Category': str(cat_val),
+                            'Code_Numeric': code_num,
+                            'Score': score
+                        })
+
+            df_train = pd.DataFrame(training_rows)
+            if df_train.empty: return False
+
+            # Entrenamos los codificadores (LabelEncoders)
+            self.le_occ.fit(df_train['Occasion'].unique())
+            self.le_cat.fit(df_train['Category'].unique()) # Fit con todas las categorías vistas
+            
+            # Transformamos texto a números
+            df_train['Occasion_Enc'] = self.le_occ.transform(df_train['Occasion'])
+            df_train['Category_Enc'] = self.le_cat.transform(df_train['Category'])
+            
+            X = df_train[['Temp', 'Occasion_Enc', 'Category_Enc', 'Code_Numeric']]
+            y = df_train['Score']
+
+            # Random Forest: Robusto y aprende relaciones no lineales
+            self.model = RandomForestRegressor(n_estimators=100, random_state=42)
+            self.model.fit(X, y)
+            self.is_trained = True
+            return True
+
+        except Exception as e:
+            print(f"Error entrenando IA: {e}")
+            return False
+
+    def predict_score(self, item_row, current_temp, occasion_code):
+        """Predice cuánto te va a gustar una prenda hoy"""
+        if not self.is_trained:
+            return 50.0 # Score neutral
+        
+        try:
+            # Manejo de etiquetas desconocidas (si aparece una ocasión nueva)
+            occ_str = str(occasion_code)
+            occ_val = self.le_occ.transform([occ_str])[0] if occ_str in self.le_occ.classes_ else 0
+            
+            cat_str = str(item_row['Category'])
+            # Si la categoría no se vio en el entrenamiento, usamos la clase 0 por defecto
+            cat_val = self.le_cat.transform([cat_str])[0] if cat_str in self.le_cat.classes_ else 0
+            
+            code_num = int(''.join(filter(str.isdigit, str(item_row['Code'])))) if any(c.isdigit() for c in str(item_row['Code'])) else 0
+
+            # Predicción
+            features = np.array([[current_temp, occ_val, cat_val, code_num]])
+            predicted_score = self.model.predict(features)[0]
+            
+            # Penalización por suciedad o sobreuso (Regla dura + IA)
+            uses = int(float(item_row['Uses'])) if item_row['Uses'] not in ['', 'nan'] else 0
+            if uses > 2: predicted_score -= 15 # Bajamos puntos si está usada
+            
+            return predicted_score
+        except Exception as e:
+            print(f"Error predicción: {e}")
+            return 50.0
+
+# Inicializamos la IA en Session State
+if 'outfit_ai' not in st.session_state:
+    st.session_state['outfit_ai'] = OutfitAI()
+
+# ==========================================
 # --- CONEXIÓN A GOOGLE SHEETS ---
+# ==========================================
 def get_google_sheet_client():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -99,7 +216,6 @@ def cargar_imagen_desde_url(url):
 
 def decodificar_sna(codigo):
     try:
-        # CORREGIDO: Quitamos .upper() para respetar mayúsculas/minúsculas
         c = str(codigo).strip()
         if len(c) < 4: return None
         season = c[0]
@@ -170,22 +286,44 @@ def get_weather_emoji(code):
     if code >= 51: return "☔"
     return "☁️"
 
+# ==========================================
 # --- LÓGICA DE NEGOCIO E INTELIGENCIA ---
-def calculate_smart_score(item_code, current_temp, feedback_df):
+# ==========================================
+
+def calculate_smart_score(item_row, current_temp, occasion, feedback_df):
+    """
+    Función Híbrida Inteligente:
+    1. Intenta usar Machine Learning (OutfitAI).
+    2. Si no hay modelo entrenado, usa Heurística (Promedios simples).
+    """
+    # Intentamos obtener la instancia de IA
+    ai = st.session_state.get('outfit_ai')
+    
+    # Si la IA no está entrenada, intentamos entrenarla ahora (Lazy Loading)
+    if ai and not ai.is_trained and not feedback_df.empty:
+        # Necesitamos el inventario para conocer las categorías de los items en el feedback
+        inv_ref = st.session_state.get('inventory', pd.DataFrame())
+        ai.train(feedback_df, inv_ref)
+
+    # --- MODO IA ---
+    if ai and ai.is_trained:
+        return ai.predict_score(item_row, current_temp, occasion)
+
+    # --- MODO CLÁSICO (FALLBACK) ---
+    # Esto se usa si tienes pocos datos (<5 feedback)
+    item_code = item_row['Code']
     base_score = 50.0 
     if feedback_df.empty: return base_score
 
     cols_to_check = [c for c in ['Top', 'Bottom', 'Outer'] if c in feedback_df.columns]
-    if not cols_to_check: return base_score
-    
     mask = pd.Series(False, index=feedback_df.index)
-    for col in cols_to_check:
-        mask |= (feedback_df[col] == item_code)
-    
+    for col in cols_to_check: mask |= (feedback_df[col] == item_code)
     history = feedback_df[mask]
+    
     if history.empty: return base_score
 
     try:
+        # Promedio simple de estrellas anteriores
         s_val = pd.to_numeric(history['Rating_Seguridad'], errors='coerce').mean()
         c_val = pd.to_numeric(history['Rating_Comodidad'], errors='coerce').mean()
         avg_rating = (s_val + c_val) / 2
@@ -193,21 +331,7 @@ def calculate_smart_score(item_code, current_temp, feedback_df):
         if pd.isna(gusto_score): gusto_score = 50
     except: gusto_score = 50
 
-    try:
-        history['Rating_Comodidad'] = pd.to_numeric(history['Rating_Comodidad'], errors='coerce')
-        history['Temp_Real'] = pd.to_numeric(history['Temp_Real'], errors='coerce')
-        good_history = history[history['Rating_Comodidad'] >= 3]
-        
-        if not good_history.empty:
-            avg_temp_usage = good_history['Temp_Real'].mean()
-            diff = abs(current_temp - avg_temp_usage)
-            weather_penalty = diff * 5 
-            weather_score = max(0, 100 - weather_penalty)
-        else:
-            weather_score = 50
-    except: weather_score = 50
-
-    return (gusto_score * 0.4) + (weather_score * 0.6)
+    return gusto_score
 
 def is_item_usable(row):
     if row['Status'] != 'Limpio': return False
@@ -234,6 +358,7 @@ def recommend_outfit(df, weather, occasion, seed):
     usable_df = df[df.apply(is_item_usable, axis=1)].copy()
     if usable_df.empty: return pd.DataFrame(), 0, ""
     
+    # 1. Filtro Blacklist (Rechazados hoy)
     blacklist = set()
     try:
         fb = load_feedback_gsheet()
@@ -251,12 +376,11 @@ def recommend_outfit(df, weather, occasion, seed):
     
     final = []
     
+    # 2. Lógica de Abrigo (Reglas duras de Clima)
     coat_msg = ""
     needs_coat = False
-    
     hourly_temps = weather.get('hourly_temp', [])
     hourly_times = weather.get('hourly_time', [])
-    
     UMBRAL_FRIO = 18 
     
     if hourly_temps and hourly_times:
@@ -296,6 +420,7 @@ def recommend_outfit(df, weather, occasion, seed):
             if not sna: continue
             match = False
             
+            # Filtros duros por temperatura (para no recomendar short con nieve)
             if category_type == 'bot':
                 attr = sna['attr']
                 if t_max > 27: 
@@ -332,15 +457,34 @@ def recommend_outfit(df, weather, occasion, seed):
         candidates_df = nb if not nb.empty else f_pool
         if candidates_df.empty: return None
 
+        # --- SELECCIÓN INTELIGENTE (IA) ---
         try:
+            candidates_df = candidates_df.copy() # Evitar SettingWithCopy
             candidates_df['LastWornDate'] = pd.to_datetime(candidates_df['LastWorn'], errors='coerce').fillna(pd.Timestamp('2000-01-01'))
-            candidates_df = candidates_df.sort_values('LastWornDate', ascending=True)
-            top_lru_count = max(1, int(len(candidates_df) * 0.5))
-            final_candidates = candidates_df.head(top_lru_count).copy()
-            final_candidates['AI_Score'] = final_candidates['Code'].apply(lambda x: calculate_smart_score(x, t_curr, fb))
-            final_candidates['Final_Score'] = final_candidates['AI_Score'] + final_candidates.apply(lambda x: random.uniform(-10, 10), axis=1)
-            return final_candidates.sort_values('Final_Score', ascending=False).iloc[0]
-        except:
+            
+            # Calculamos el Score IA para cada candidato
+            # Pasamos toda la fila (r) + temp actual + ocasion + historial
+            candidates_df['AI_Score'] = candidates_df.apply(
+                lambda x: calculate_smart_score(x, t_curr, occasion, fb), 
+                axis=1
+            )
+            
+            # Agregamos ruido aleatorio pequeño para variar si los scores son iguales
+            # random.uniform(-5, 5) da un margen de variación del 10% sobre 100
+            candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df.apply(lambda x: random.uniform(-5, 5), axis=1)
+            
+            # Priorizamos los que llevan más tiempo sin usarse (LRU suave) dentro de los mejores scores
+            # Dividimos por días desde último uso para dar un bonus a lo viejo
+            # (Opcional, pero ayuda a rotar)
+            
+            # Ordenamos por Score final descendente
+            final_candidates = candidates_df.sort_values('Final_Score', ascending=False)
+            
+            # Devolvemos el ganador
+            return final_candidates.iloc[0]
+
+        except Exception as e:
+            # Fallback si falla la IA: Selección Random
             return candidates_df.sample(1, random_state=seed).iloc[0]
 
     top = get_best(['Remera', 'Camisa'], 'top'); 
@@ -354,9 +498,11 @@ def recommend_outfit(df, weather, occasion, seed):
         
     return pd.DataFrame(final), t_feel, coat_msg
 
+# ==========================================
 # --- INTERFAZ PRINCIPAL ---
+# ==========================================
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v15.4 - Smart AI (Fixed) 🧠")
+st.sidebar.caption("v16.0 - Neural Engine 🧠")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -415,7 +561,7 @@ with st.sidebar:
                                 if img and len(str(img)) > 5: st.image(cargar_imagen_desde_url(img), width=80)
                                 else: st.write(f"🏷️ {code}")
                             else: st.write(f"{code}")
-                    
+                        
                     c1, c2 = st.columns(2)
                     with c1: show_mini(last['Top'], "Top")
                     with c2: show_mini(last['Bottom'], "Bot")
@@ -456,6 +602,7 @@ with tab1:
         temp_calculada = float(outfit_of_the_day['User_Adj_Temp'])
         _, _, coat_advice = recommend_outfit(df, weather, code_occ, 0)
     else:
+        # Llamada a recomendación (AHORA USA IA INTERNAMENTE)
         recs_df, temp_calculada, coat_advice = recommend_outfit(df, weather, code_occ, st.session_state['seed'])
 
     for cat_key, code_val in st.session_state['custom_overrides'].items():
@@ -479,7 +626,7 @@ with tab1:
         if coat_advice: st.markdown(f"**{coat_advice}**")
 
     col_h1, col_h2 = st.columns([2, 2])
-    with col_h1: st.subheader("Tu Outfit")
+    with col_h1: st.subheader("Tu Outfit (AI)")
     with col_h2: 
         c_btn1, c_btn2 = st.columns(2)
         if c_btn1.button("🔄 Cambiar", use_container_width=True): 
@@ -500,7 +647,6 @@ with tab1:
                 new_out = cc3.text_input("Abrigo", placeholder="Code...")
                 if st.form_submit_button("Aplicar"):
                     overrides = {}
-                    # CORREGIDO: Quitamos .upper()
                     if new_top.strip(): overrides['top'] = new_top.strip()
                     if new_bot.strip(): overrides['bot'] = new_bot.strip()
                     if new_out.strip(): overrides['out'] = new_out.strip()
@@ -524,6 +670,12 @@ with tab1:
                 st.markdown(f"**{item['Category']}**")
                 st.caption(f"Code: `{item['Code']}`")
                 st.progress(health, text=f"Vida: {uses}/{limit}")
+                
+                # Mostrar Score de IA si existe
+                if 'AI_Score' in item:
+                    score_val = float(item['AI_Score'])
+                    st.caption(f"🤖 Match: {int(score_val)}%")
+
                 if health == 0: st.error("⚠️ AL LIMITE: Lavar") 
                 return item
             else: st.info("🤷‍♂️ N/A"); return None
@@ -684,7 +836,6 @@ with tab2:
                 with col_b2: btn_sucio = st.form_submit_button("🗑️ Sucio", use_container_width=True)
                 
                 if code_input:
-                    # CORREGIDO: Quitamos .upper()
                     code_clean = code_input.strip()
                     if code_clean in df['Code'].astype(str).values:
                         idx = df[df['Code'] == code_clean].index[0]
@@ -714,7 +865,6 @@ with tab2:
             b_sub = st.button("➖ Restar Uso", use_container_width=True)
 
         if code_mod:
-            # CORREGIDO: Quitamos .upper()
             clean_code = code_mod.strip()
             if clean_code in df['Code'].astype(str).values:
                 idx = df[df['Code'] == clean_code].index[0]
@@ -800,7 +950,6 @@ with tab5:
     with c_s2:
         st.subheader("👻 Prendas Muertas")
         st.caption(">90 días sin uso")
-        # --- CORREGIDO AQUÍ: Se asegura que la función siempre retorne True o False ---
         def is_dead_stock(row):
             if row['Status'] != 'Limpio': return False
             if pd.isna(row['LastWorn']) or str(row['LastWorn']) in ['', 'nan', 'None']: return False
@@ -808,7 +957,7 @@ with tab5:
                 last_date = datetime.fromisoformat(str(row['LastWorn']))
                 if (datetime.now() - last_date).days > 90: return True
             except: return False
-            return False # <--- ESTO FALTABA PARA EVITAR EL ERROR
+            return False 
         dead_df = df[df.apply(is_dead_stock, axis=1)]
         if not dead_df.empty: st.dataframe(dead_df[['Category', 'Code']], hide_index=True, use_container_width=True)
         else: st.success("¡Rotación impecable!")
