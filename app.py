@@ -755,7 +755,7 @@ with tab2:
                     btn_sucio = st.form_submit_button("🗑️ Sucio", use_container_width=True)
                 
                 if code_input:
-                    code_clean = code_input.strip().upper()
+                    code_clean = code_input.strip()
                     if code_clean in df['Code'].values:
                         idx = df[df['Code'] == code_clean].index[0]
                         if btn_lavar:
