@@ -12,7 +12,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import random
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v13.1", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v14.0", layout="centered", page_icon="🧥")
 
 # --- CONEXIÓN A GOOGLE SHEETS ---
 def get_google_sheet_client():
@@ -66,8 +66,19 @@ def save_feedback_entry_gsheet(entry):
         sheet.append_row(row)
     except: pass
 
-# --- LÍMITES Y FUNCIONES ---
-LIMITES_USO = {"Je": 6, "Ve": 4, "DL": 3, "DC": 2, "Sh": 1, "R": 2, "CS": 3, "B": 5, "C": 10}
+# --- LÍMITES Y FUNCIONES (MODIFICADOS PARA PERFIL HIGIENE ALTA) ---
+# Se redujeron drásticamente los usos antes de lavar
+LIMITES_USO = {
+    "Je": 3,  # Jeans: Antes 6, ahora 3
+    "Ve": 2,  # Vestir: Antes 4, ahora 2
+    "DL": 2,  # Deportivo Largo: Antes 3, ahora 2
+    "DC": 1,  # Deportivo Corto: 1 uso (sudor garantizado)
+    "Sh": 1,  # Short: 1 uso
+    "R": 1,   # Remera: 1 uso (Fundamental para quien transpira)
+    "CS": 2,  # Camisa: Antes 3, ahora 2
+    "B": 3,   # Buzo: Antes 5, ahora 3
+    "C": 5    # Campera (Outer): Se mantiene alto pq no toca piel
+}
 
 def get_mendoza_time():
     try: return datetime.now(pytz.timezone('America/Argentina/Mendoza'))
@@ -99,12 +110,12 @@ def decodificar_sna(codigo):
     except: return None
 
 def get_limit_for_item(category, sna):
-    if not sna: return 5
-    if category == 'Pantalón': return LIMITES_USO.get(sna['attr'], 3)
-    elif category in ['Remera', 'Camisa']: return LIMITES_USO.get(sna['tipo'], 2)
-    return LIMITES_USO.get(sna['tipo'], 5)
+    if not sna: return 3
+    if category == 'Pantalón': return LIMITES_USO.get(sna['attr'], 2)
+    elif category in ['Remera', 'Camisa']: return LIMITES_USO.get(sna['tipo'], 1)
+    return LIMITES_USO.get(sna['tipo'], 3)
 
-# --- CLIMA LOCAL (MENDOZA) ---
+# --- CLIMA LOCAL ---
 def get_weather_open_meteo():
     try:
         url = "https://api.open-meteo.com/v1/forecast?latitude=-32.8908&longitude=-68.8272&current=temperature_2m,apparent_temperature,weather_code&daily=temperature_2m_max,temperature_2m_min&timezone=auto"
@@ -161,27 +172,21 @@ def get_weather_emoji(code):
     if code >= 95: return "⚡"
     return "☁️"
 
-# --- LÓGICA DE NEGOCIO Y AYUDAS ---
-# Desactivado el timer automático para que tengas control manual total
-# def check_laundry_timers(df): ... 
+# --- LÓGICA DE NEGOCIO ---
 
 def is_item_usable(row):
-    # Verifica si la prenda está limpia y NO ha superado su límite de uso
     if row['Status'] != 'Limpio': return False
     sna = decodificar_sna(row['Code'])
     if not sna: return True
     limit = get_limit_for_item(row['Category'], sna)
     try:
         uses = int(float(row['Uses'])) if row['Uses'] not in ['', 'nan'] else 0
-        if uses >= limit: return False # BLOQUEO ESTRICTO
+        if uses >= limit: return False
     except: pass
     return True
 
 def is_needs_wash(row):
-    # Esta función determina si una prenda está sucia REALMENTE
-    # (Ya sea porque el estado es 'Sucio' O porque 'Uses' >= Límite)
     if row['Status'] in ['Sucio', 'Lavando']: return True
-    
     sna = decodificar_sna(row['Code'])
     if not sna: return False
     limit = get_limit_for_item(row['Category'], sna)
@@ -191,9 +196,7 @@ def is_needs_wash(row):
     except: return False
 
 def recommend_outfit(df, weather, occasion, seed):
-    # Usamos is_item_usable que ya filtra las que pasaron el límite
     usable_df = df[df.apply(is_item_usable, axis=1)].copy()
-    
     if usable_df.empty: return pd.DataFrame(), 0
     
     blacklist = set()
@@ -278,7 +281,7 @@ def recommend_outfit(df, weather, occasion, seed):
 
 # --- INTERFAZ PRINCIPAL ---
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v13.1 - Fix Suciedad")
+st.sidebar.caption("v14.0 - Higiene Check")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -293,7 +296,6 @@ if 'change_mode' not in st.session_state: st.session_state['change_mode'] = Fals
 if 'confirm_stage' not in st.session_state: st.session_state['confirm_stage'] = 0 
 if 'alerts_buffer' not in st.session_state: st.session_state['alerts_buffer'] = []
 
-# Eliminado el check_laundry_timers automatico
 df = st.session_state['inventory']
 weather = get_weather_open_meteo()
 
@@ -497,22 +499,33 @@ with tab1:
                     if not force_register:
                         st.button("✅ Registrar Uso", disabled=True, key="btn_disabled")
                     else:
+                        is_sweat = st.checkbox("💦 Transpiración Alta (Mandar todo a lavar)")
                         if st.button("✅ Registrar Uso (Forzado)", type="primary", use_container_width=True):
                             alerts = []
                             for item in selected_items_codes:
-                                idx = df[df['Code'] == item['Code']].index[0]
-                                sna = decodificar_sna(item['Code'])
-                                limit = get_limit_for_item(item['Category'], sna)
-                                current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
-                                if (current_uses + 1) > limit: alerts.append({'code': item['Code'], 'cat': item['Category'], 'uses': current_uses, 'limit': limit})
+                                if is_sweat:
+                                    # Si transpira, no importa el limite, se ensucia
+                                    pass 
+                                else:
+                                    idx = df[df['Code'] == item['Code']].index[0]
+                                    sna = decodificar_sna(item['Code'])
+                                    limit = get_limit_for_item(item['Category'], sna)
+                                    current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
+                                    if (current_uses + 1) > limit: alerts.append({'code': item['Code'], 'cat': item['Category'], 'uses': current_uses, 'limit': limit})
                             
                             if alerts: st.session_state['alerts_buffer'] = alerts; st.session_state['confirm_stage'] = 1; st.rerun()
                             else:
                                 for item in selected_items_codes:
                                     idx = df[df['Code'] == item['Code']].index[0]
-                                    curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
-                                    df.at[idx, 'Uses'] = curr + 1
-                                    df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
+                                    if is_sweat:
+                                        # Lógica Sweat: Marca sucio directo
+                                        df.at[idx, 'Status'] = 'Sucio'
+                                        df.at[idx, 'Uses'] = 0 # O dejarlo lleno, pero sucio es lo importante
+                                        df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
+                                    else:
+                                        curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
+                                        df.at[idx, 'Uses'] = curr + 1
+                                        df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
                                 st.session_state['inventory'] = df; save_data_gsheet(df)
                                 ra = r_abrigo
                                 rc = r_comodidad + 1 if r_comodidad is not None else 3
@@ -524,22 +537,35 @@ with tab1:
                                 entry = {'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada, 'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 'Rating_Abrigo': ra, 'Rating_Comodidad': rc, 'Rating_Seguridad': rs, 'Action': 'Accepted', 'Top_Abrigo': v_rt_a, 'Top_Comodidad': v_rt_c, 'Top_Flow': v_rt_f, 'Bot_Abrigo': v_rb_a, 'Bot_Comodidad': v_rb_c, 'Bot_Flow': v_rb_f, 'Out_Abrigo': v_ro_a, 'Out_Comodidad': v_ro_c, 'Out_Flow': v_ro_f}
                                 save_feedback_entry_gsheet(entry); st.toast("¡Outfit registrado!"); st.rerun()
                 else:
+                    # CHECKBOX MAGICO
+                    is_sweat = st.checkbox("💦 Transpiración Alta (Mandar todo a lavar)")
+                    
                     if st.button("✅ Registrar Uso", type="primary", use_container_width=True):
                         alerts = []
                         for item in selected_items_codes:
-                            idx = df[df['Code'] == item['Code']].index[0]
-                            sna = decodificar_sna(item['Code'])
-                            limit = get_limit_for_item(item['Category'], sna)
-                            current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
-                            if (current_uses + 1) > limit: alerts.append({'code': item['Code'], 'cat': item['Category'], 'uses': current_uses, 'limit': limit})
+                            if is_sweat:
+                                # Si hay sudor, NO chequeamos limites, se va a lavar si o si
+                                pass
+                            else:
+                                idx = df[df['Code'] == item['Code']].index[0]
+                                sna = decodificar_sna(item['Code'])
+                                limit = get_limit_for_item(item['Category'], sna)
+                                current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
+                                if (current_uses + 1) > limit: alerts.append({'code': item['Code'], 'cat': item['Category'], 'uses': current_uses, 'limit': limit})
                         
                         if alerts: st.session_state['alerts_buffer'] = alerts; st.session_state['confirm_stage'] = 1; st.rerun()
                         else:
                             for item in selected_items_codes:
                                 idx = df[df['Code'] == item['Code']].index[0]
-                                curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
-                                df.at[idx, 'Uses'] = curr + 1
-                                df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
+                                if is_sweat:
+                                    # Lógica Sweat: Marca sucio directo
+                                    df.at[idx, 'Status'] = 'Sucio'
+                                    # df.at[idx, 'Uses'] = 99 # Opcional: llenar barra
+                                    df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
+                                else:
+                                    curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
+                                    df.at[idx, 'Uses'] = curr + 1
+                                    df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
 
                             st.session_state['inventory'] = df; save_data_gsheet(df)
                             
@@ -590,7 +616,7 @@ with tab1:
 with tab2: 
     st.header("Lavadero")
     
-    # NUEVA SECCIÓN: LISTA DE SUCIOS
+    # LISTA DE SUCIOS
     dirty_list = df[df.apply(is_needs_wash, axis=1)]
     st.subheader(f"🧺 Canasto de Ropa Sucia ({len(dirty_list)})")
     if not dirty_list.empty:
