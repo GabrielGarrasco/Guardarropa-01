@@ -15,7 +15,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import LabelEncoder
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v17.2 Lite", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v17.3", layout="centered", page_icon="🧥")
 
 # ==========================================
 # --- MOTOR DE INTELIGENCIA ARTIFICIAL ---
@@ -292,75 +292,21 @@ def recommend_outfit(df, weather, occasion, seed):
             coat_msg = "☀️ No hace falta abrigo hoy."
             needs_coat = False
 
-    # Definimos qué ocasiones se pueden mezclar
-    # Si es F o U, buscamos en ambas. Si es otra cosa, busca estricto.
+    # --- LÓGICA DE CATEGORÍAS ---
+    # F y U se comparten. El resto son estrictas.
     target_occs = [occasion]
     if occasion in ['F', 'U']:
-        target_occs = ['F', 'U'] # Permite compartir ropa entre Formal y Universidad
+        target_occs = ['F', 'U'] 
 
     def get_best(cats, category_type):
         curr_s = get_current_season()
         
-        # Filtro: Categoría + (Ocasión actual O compartida) + Temporada
+        # Filtro: Categoría + Ocasión(es) + Temporada
         pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occs)) & ((usable_df['Season'] == curr_s) | (usable_df['Season'] == 'T'))]
         
-        # Respaldo: Misma lógica de ocasión (mezclada), pero cualquier temporada
+        # Respaldo: Misma ocasión, pero cualquier temporada
         if pool.empty: pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occs))]
         
-        if pool.empty: return None
-        
-        cands = []
-        for _, r in pool.iterrows():
-            sna = decodificar_sna(r['Code'])
-            if not sna: continue
-            match = False
-            if category_type == 'bot':
-                attr = sna['attr']
-                if t_max > 27: match = attr in ['Sh', 'DC', 'Ve']
-                elif t_max < 15: match = attr in ['Je', 'DL', 'Ve']
-                else: match = True 
-            elif category_type == 'top':
-                attr = sna['attr']
-                if t_max > 30: match = attr in ['00', '01']
-                elif t_max < 18: match = attr == '02'
-                else: match = True
-            elif category_type == 'out':
-                if not needs_coat: match = False 
-                else:
-                    try:
-                        lvl = int(sna['attr'])
-                        match = (t_min < 10 and lvl >= 3) or (t_min < 16 and lvl in [2, 3]) or (t_min < 22 and lvl == 1)
-                    except: match = False
-            if match: cands.append(r)
-        
-        f_pool = pd.DataFrame(cands) if cands else pool
-        nb = f_pool[~f_pool['Code'].isin(blacklist)]
-        candidates_df = nb if not nb.empty else f_pool
-        if candidates_df.empty: return None
-
-        try:
-            candidates_df = candidates_df.copy()
-            candidates_df['AI_Score'] = candidates_df.apply(lambda x: calculate_smart_score(x, t_curr, occasion, fb), axis=1)
-            candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df.apply(lambda x: random.uniform(-5, 5), axis=1)
-            return candidates_df.sort_values('Final_Score', ascending=False).iloc[0]
-        except: return candidates_df.sample(1, random_state=seed).iloc[0]
-
-    top = get_best(['Remera', 'Camisa'], 'top'); 
-    if top is not None: final.append(top)
-    bot = get_best(['Pantalón'], 'bot'); 
-    if bot is not None: final.append(bot)
-    if needs_coat:
-        out = get_best(['Campera', 'Buzo'], 'out')
-        if out is not None: final.append(out)
-        
-    return pd.DataFrame(final), t_feel, coat_msg
-
-    def get_best(cats, category_type):
-        curr_s = get_current_season()
-        pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(primary_occ)) & ((usable_df['Season'] == curr_s) | (usable_df['Season'] == 'T'))]
-        if pool.empty: pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(primary_occ))]
-        if pool.empty and occasion == 'D' and fallback_occ: pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(fallback_occ))]
-        if pool.empty and occasion != 'D': pool = usable_df[usable_df['Category'].isin(cats)]
         if pool.empty: return None
         
         cands = []
@@ -413,83 +359,77 @@ def recommend_outfit(df, weather, occasion, seed):
 # --- INTERFAZ PRINCIPAL ---
 # ==========================================
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v17.2 - Lite Edition")
+st.sidebar.caption("v17.3 - Lite Edition")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
 code_occ = user_occ[0]
-# --- VENTANA: TU LOOK DE HOY ---
-    st.markdown("---")
-    st.markdown("###### 🧢 Hoy llevas puesto:")
+
+# --- VENTANA SIDEBAR: TU LOOK DE HOY ---
+st.sidebar.markdown("---")
+st.sidebar.markdown("###### 🧢 Hoy llevas puesto:")
+if 'inventory' not in st.session_state: 
+    with st.spinner("Cargando sistema..."): st.session_state['inventory'] = load_data_gsheet()
+df = st.session_state['inventory']
+
+try:
+    fb_side = load_feedback_gsheet()
+    found_today = False
     
-    try:
-        # Cargamos el historial para ver qué confirmaste hoy
-        fb_side = load_feedback_gsheet()
-        found_today = False
+    if not fb_side.empty and 'Action' in fb_side.columns:
+        today_date = get_mendoza_time().strftime("%Y-%m-%d")
+        match_today = fb_side[(fb_side['Date'].astype(str).str.contains(today_date, na=False)) & (fb_side['Action'] == 'Accepted')]
         
-        if not fb_side.empty and 'Action' in fb_side.columns:
-            today_date = get_mendoza_time().strftime("%Y-%m-%d")
-            # Filtramos: Que sea de hoy Y que esté "Accepted"
-            match_today = fb_side[(fb_side['Date'].astype(str).str.contains(today_date, na=False)) & (fb_side['Action'] == 'Accepted')]
+        if not match_today.empty:
+            found_today = True
+            last_fit = match_today.iloc[-1]
             
-            if not match_today.empty:
-                found_today = True
-                last_fit = match_today.iloc[-1] # Tomamos el último confirmado
-                
-                # Función auxiliar para mostrar imagen pequeña o código
-                def mostrar_mini_sidebar(code, label):
-                    if code and code not in ['N/A', 'nan', 'None', '']:
-                        item_data = df[df['Code'] == code]
-                        if not item_data.empty:
-                            img_url = item_data.iloc[0]['ImageURL']
-                            if img_url and len(str(img_url)) > 5:
-                                st.image(cargar_imagen_desde_url(img_url), use_container_width=True)
-                            else:
-                                st.caption(f"{code}")
+            def mostrar_mini_sidebar(code, label):
+                if code and code not in ['N/A', 'nan', 'None', '']:
+                    item_data = df[df['Code'] == code]
+                    if not item_data.empty:
+                        img_url = item_data.iloc[0]['ImageURL']
+                        if img_url and len(str(img_url)) > 5:
+                            st.sidebar.image(cargar_imagen_desde_url(img_url), use_container_width=True)
                         else:
-                            st.caption(f"{code}")
+                            st.sidebar.caption(f"{code}")
                     else:
-                        st.caption("-")
+                        st.sidebar.caption(f"{code}")
+                else:
+                    st.sidebar.caption("-")
 
-                # Mostramos las prendas en columnas pequeñas
-                c_s1, c_s2, c_s3 = st.columns(3)
-                with c_s1: 
-                    st.caption("Top")
-                    mostrar_mini_sidebar(last_fit['Top'], "Top")
-                with c_s2: 
-                    st.caption("Bot")
-                    mostrar_mini_sidebar(last_fit['Bottom'], "Bot")
-                with c_s3: 
-                    st.caption("Out")
-                    mostrar_mini_sidebar(last_fit['Outer'], "Out")
-            
-        if not found_today:
-            st.info("🤷‍♂️ Aún no registraste nada hoy.")
-            
-    except Exception as e:
-        st.error("Error al cargar.")
+            s1, s2, s3 = st.sidebar.columns(3)
+            with s1: 
+                st.caption("Top")
+                mostrar_mini_sidebar(last_fit['Top'], "Top")
+            with s2: 
+                st.caption("Bot")
+                mostrar_mini_sidebar(last_fit['Bottom'], "Bot")
+            with s3: 
+                st.caption("Out")
+                mostrar_mini_sidebar(last_fit['Outer'], "Out")
+        
+    if not found_today:
+        st.sidebar.info("🤷‍♂️ Nada registrado.")
+        
+except:
+    st.sidebar.error("Error al cargar.")
 
+# --- INICIO VARIABLES SESSION ---
 if 'last_occ_viewed' not in st.session_state: st.session_state['last_occ_viewed'] = code_occ
 if st.session_state['last_occ_viewed'] != code_occ:
     st.session_state['custom_overrides'] = {}; st.session_state['last_occ_viewed'] = code_occ
-if 'inventory' not in st.session_state: 
-    with st.spinner("Cargando sistema..."): st.session_state['inventory'] = load_data_gsheet()
 if 'seed' not in st.session_state: st.session_state['seed'] = random.randint(1, 1000) 
 if 'custom_overrides' not in st.session_state: st.session_state['custom_overrides'] = {}
 if 'change_mode' not in st.session_state: st.session_state['change_mode'] = False
 if 'confirm_stage' not in st.session_state: st.session_state['confirm_stage'] = 0 
 if 'alerts_buffer' not in st.session_state: st.session_state['alerts_buffer'] = []
 
-# ... (código anterior donde defines df y weather) ...
-
-df = st.session_state['inventory']
 weather = get_weather_open_meteo()
-
-# (AQUI BORRASTE TODO EL BLOQUE "SIDEBAR STATUS")
 
 # --- TABS ---
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Viaje"])
-# ... (sigue el resto del programa) ...
+
 with tab1:
     today_str = get_mendoza_time().strftime("%Y-%m-%d")
     outfit_of_the_day = None
