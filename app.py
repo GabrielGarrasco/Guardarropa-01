@@ -906,32 +906,91 @@ with tab1:
 with tab2: 
     st.header("Lavadero")
     
-    with st.expander("🧠 Smart Laundry (Sugerencia IA)", expanded=True):
+    # --- DICCIONARIO DE PESOS ESTIMADOS (EN GRAMOS) ---
+    PESOS_PRENDAS = {
+        "Pantalón": 600,
+        "Je": 650, "Gab": 600, "Jog": 500, "Sh": 300, # Variaciones si las hay
+        "Remera": 200,
+        "Camisa": 250,
+        "Buzo": 700,
+        "Campera": 800,
+        "Short": 250
+    }
+    
+    with st.expander("🧠 Smart Laundry (Carga Inteligente)", expanded=True):
         if not df.empty:
             dirty_pool = df[df['Status'].isin(['Sucio', 'Lavando'])]
             clean_pool = df[df['Status'] == 'Limpio']
             
+            # 1. APRENDIZAJE DE CAPACIDAD (Peso promedio histórico por día de lavado)
+            # Agrupamos por fecha de lavado (LaundryStart) para ver cuánto sueles cargar
+            df['Weight_Est'] = df['Category'].map(PESOS_PRENDAS).fillna(300) # 300g default
+            
+            learned_capacity = 4000 # Default 4kg si no hay datos
+            try:
+                # Filtramos items que tengan fecha de lavado registrada
+                history_wash = df[df['LaundryStart'] != '']
+                if not history_wash.empty:
+                    # Extraemos solo la fecha (YYYY-MM-DD) para agrupar cargas del mismo día
+                    history_wash['WashDate'] = pd.to_datetime(history_wash['LaundryStart']).dt.date
+                    daily_loads = history_wash.groupby('WashDate')['Weight_Est'].sum()
+                    # Calculamos el promedio de carga que sueles hacer (excluyendo cargas muy chicas < 1kg)
+                    real_loads = daily_loads[daily_loads > 1000]
+                    if not real_loads.empty:
+                        learned_capacity = int(real_loads.mean())
+            except: pass
+            
+            st.caption(f"⚖️ Capacidad de lavado aprendida: **{learned_capacity/1000:.1f} kg**")
+
             if dirty_pool.empty:
                 st.success("¡Nada que lavar!")
             else:
                 total_counts = df['Category'].value_counts()
                 clean_counts = clean_pool['Category'].value_counts()
                 
+                # 2. CALCULO DE ESCASEZ (PRIORIDAD)
                 recommendations = []
                 for _, row in dirty_pool.iterrows():
                     cat = row['Category']
                     code = row['Code']
+                    weight = PESOS_PRENDAS.get(cat, 300)
+                    
                     total_c = total_counts.get(cat, 1)
                     clean_c = clean_counts.get(cat, 0)
+                    
+                    # Escasez: Mientras menos limpia tenga, más urgente es lavar
                     scarcity_ratio = 1 - (clean_c / total_c)
-                    scarcity_score = scarcity_ratio * 10
-                    final_wash_score = scarcity_score + random.uniform(0, 2)
-                    recommendations.append({'Code': code, 'Category': cat, 'Score': final_wash_score})
+                    priority_score = (scarcity_ratio * 100) + random.uniform(0, 5)
+                    
+                    recommendations.append({
+                        'Code': code, 
+                        'Category': cat, 
+                        'Score': priority_score,
+                        'Weight': weight
+                    })
                 
-                recs_wash_df = pd.DataFrame(recommendations).sort_values('Score', ascending=False).head(5)
-                st.info("💡 La IA sugiere lavar esto prioritariamente (por escasez de limpias):")
-                for _, r in recs_wash_df.iterrows():
-                    st.write(f"• **{r['Category']}** `{r['Code']}`")
+                # 3. ARMADO DE LA CARGA ÓPTIMA (KNAPSACK PROBLEM SIMPLIFICADO)
+                # Ordenamos por prioridad (los más necesitados primero)
+                recs_sorted = sorted(recommendations, key=lambda x: x['Score'], reverse=True)
+                
+                current_load_weight = 0
+                final_basket = []
+                
+                for item in recs_sorted:
+                    if current_load_weight + item['Weight'] <= (learned_capacity * 1.1): # Margen del 10%
+                        final_basket.append(item)
+                        current_load_weight += item['Weight']
+                
+                # Visualización
+                st.info(f"💡 Sugerencia para optimizar carga ({current_load_weight/1000:.2f}kg / {learned_capacity/1000:.1f}kg):")
+                
+                cols = st.columns(3)
+                for i, item in enumerate(final_basket):
+                    cols[i%3].write(f"• `{item['Code']}` ({item['Category']})")
+                
+                if len(final_basket) < len(dirty_pool):
+                    leftover = len(dirty_pool) - len(final_basket)
+                    st.caption(f"Quedan {leftover} prendas sucias de menor prioridad para el próximo lavado.")
     
     st.divider()
     dirty_list = df[df.apply(is_needs_wash, axis=1)]
