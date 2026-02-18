@@ -437,31 +437,22 @@ def create_outfit_canvas(top_code, bot_code, out_code, df_inv):
 # ==========================================
 # --- MODULO TELEGRAM INTEGRADO ---
 # ==========================================
+# --- FUNCIÓN PUENTE PARA EL BOTÓN MANUAL ---
 def enviar_foto_telegram(caption, image):
-    """Envía imagen (canvas) y texto a Telegram usando requests y BytesIO."""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or TELEGRAM_TOKEN == "TU_TOKEN_AQUI":
-        return False, "⚠️ Faltan credenciales de Telegram en el código."
-    
+    """Envía mensaje usando la instancia del bot definida al final"""
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-        
-        # Convertir PIL Image a BytesIO
+        # Convertir imagen para enviar
         bio = BytesIO()
         image.save(bio, format='PNG')
         bio.seek(0)
         
-        files = {'photo': bio}
-        data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': caption, 'parse_mode': 'Markdown'}
-        
-        resp = requests.post(url, files=files, data=data)
-        
-        if resp.status_code == 200:
-            return True, "Mensaje enviado con éxito"
-        else:
-            return False, f"Error Telegram: {resp.text}"
+        # Usamos la variable global 'bot' que se inicia al final del script
+        # Nota: Python la encontrará porque la función se ejecuta al hacer clic, 
+        # cuando ya todo el script cargó.
+        bot.send_photo(TELEGRAM_CHAT_ID, photo=bio, caption=caption, parse_mode='Markdown')
+        return True, "Mensaje enviado con éxito (Telebot)"
     except Exception as e:
-        return False, f"Error de conexión: {str(e)}"
-
+        return False, f"Error: {str(e)}"
 def enviar_briefing_diario():
     """Genera el reporte completo y lo envía (Apto para Automatización)."""
     try:
@@ -1576,33 +1567,167 @@ with tab7:
     else:
         st.caption("No hay eventos futuros.")
 # ==========================================
-# --- AUTOMATIZACIÓN (BACKGROUND THREAD) ---
 # ==========================================
-import threading
+# --- NUEVO MÓDULO TELEGRAM INTERACTIVO (Telebot) ---
+# ==========================================
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import schedule
 import time
+import threading
 
-def background_scheduler():
-    """Chequea la hora cada minuto y dispara el briefing a las 08:00 AM."""
+# Inicializar Bot
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+def generar_teclado_ocasiones():
+    """Crea los botones para elegir la ocasión a las 7 AM"""
+    markup = InlineKeyboardMarkup()
+    markup.row_width = 2
+    markup.add(
+        InlineKeyboardButton("🏠 Casa", callback_data="occ_C"),
+        InlineKeyboardButton("🎓 Universidad", callback_data="occ_U"),
+        InlineKeyboardButton("👔 Formal", callback_data="occ_F"),
+        InlineKeyboardButton("⚽ Deporte", callback_data="occ_D")
+    )
+    return markup
+
+def generar_teclado_acciones(occ_code):
+    """Crea los botones de Cambiar o Manual"""
+    markup = InlineKeyboardMarkup()
+    markup.add(
+        InlineKeyboardButton("🔄 Cambiar", callback_data=f"reroll_{occ_code}"),
+        InlineKeyboardButton("🛠️ Manual", callback_data="manual_mode")
+    )
+    return markup
+
+# --- MANEJO DE CLICS EN BOTONES (CALLBACKS) ---
+@bot.callback_query_handler(func=lambda call: True)
+def callback_query(call):
+    # El usuario seleccionó una ocasión
+    if call.data.startswith("occ_"):
+        occ_code = call.data.split("_")[1]
+        bot.answer_callback_query(call.id, "Generando outfit...")
+        enviar_sugerencia_interactiva(occ_code, call.message.chat.id)
+
+    # El usuario quiere cambiar (Reroll)
+    elif call.data.startswith("reroll_"):
+        occ_code = call.data.split("_")[1]
+        bot.answer_callback_query(call.id, "Buscando otra opción...")
+        # Borrar mensaje anterior para no llenar el chat
+        try: bot.delete_message(call.message.chat.id, call.message.message_id)
+        except: pass
+        enviar_sugerencia_interactiva(occ_code, call.message.chat.id, force_new_seed=True)
+
+    # El usuario elige manual
+    elif call.data == "manual_mode":
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, "🛠️ Entendido. Abre la app para editar manualmente: https://gdi-mendoza-ops-v21.streamlit.app")
+
+def enviar_sugerencia_interactiva(occ_code, chat_id, force_new_seed=False):
+    """Genera el outfit y manda la foto con botones"""
+    try:
+        # Cargar datos frescos (IMPORTANTE: Esto corre en un hilo aparte)
+        df_inv = load_data_gsheet()
+        if df_inv.empty:
+            bot.send_message(chat_id, "⚠️ Error leyendo base de datos.")
+            return
+
+        # Obtener clima actual
+        w_data = get_weather_open_meteo()
+        
+        # Generar semilla aleatoria
+        seed = random.randint(1, 10000) if force_new_seed else int(datetime.now().timestamp())
+        
+        # Generar recomendación
+        recs, temp_calc, advice = recommend_outfit(df_inv, w_data, occ_code, seed)
+        
+        if recs.empty:
+            bot.send_message(chat_id, "⚠️ No hay ropa limpia disponible para esta ocasión.")
+            return
+
+        # Extraer códigos
+        r_top = recs[recs['Category'].isin(['Remera', 'Camisa'])].iloc[0]['Code'] if not recs[recs['Category'].isin(['Remera', 'Camisa'])].empty else None
+        r_bot = recs[recs['Category'] == 'Pantalón'].iloc[0]['Code'] if not recs[recs['Category'] == 'Pantalón'].empty else None
+        r_out = recs[recs['Category'].isin(['Campera', 'Buzo'])].iloc[0]['Code'] if not recs[recs['Category'].isin(['Campera', 'Buzo'])].empty else None
+
+        # Crear Canvas
+        canvas = create_outfit_canvas(r_top, r_bot, r_out, df_inv)
+        
+        # Texto del mensaje
+        caption = (
+            f"🧥 *Propuesta para {occ_code}*\n"
+            f"🌡️ Clima: {w_data['temp']}°C (ST {w_data['feels_like']}°C)\n"
+            f"💡 {advice}\n\n"
+            f"• Top: {r_top}\n• Bot: {r_bot}\n• Out: {r_out}"
+        )
+
+        # Enviar foto con botones
+        bio = BytesIO()
+        canvas.save(bio, format='PNG')
+        bio.seek(0)
+        
+        bot.send_photo(
+            chat_id, 
+            photo=bio, 
+            caption=caption, 
+            parse_mode='Markdown',
+            reply_markup=generar_teclado_acciones(occ_code)
+        )
+
+    except Exception as e:
+        bot.send_message(chat_id, f"Error generando: {str(e)}")
+
+# --- TAREAS PROGRAMADAS ---
+def tarea_manana():
+    """Manda la pregunta de las 7 AM"""
+    try:
+        bot.send_message(
+            TELEGRAM_CHAT_ID, 
+            "🌅 *Buenos días.*\n¿Para qué ocasión te vistes hoy?", 
+            parse_mode="Markdown",
+            reply_markup=generar_teclado_ocasiones()
+        )
+    except Exception as e:
+        print(f"Error tarea mañana: {e}")
+
+def tarea_noche():
+    """Manda el recordatorio de las 22 PM"""
+    try:
+        msg = (
+            "🌙 *Check de fin de día*\n"
+            "No olvides calificar el outfit sugerido hoy para mejorar la IA.\n\n"
+            "👉 [Abrir GDI: Mendoza Ops](https://gdi-mendoza-ops-v21.streamlit.app)"
+        )
+        bot.send_message(TELEGRAM_CHAT_ID, msg, parse_mode="Markdown")
+    except Exception as e:
+        print(f"Error tarea noche: {e}")
+
+# --- THREAD DE CONTROL ---
+def run_scheduler_and_bot():
+    """Ejecuta el scheduler y el polling del bot simultáneamente"""
+    
+    # Programar horarios (Hora del servidor, ojo con la zona horaria)
+    # Si el servidor está en UTC y Mendoza es UTC-3:
+    # 7 AM Mendoza = 10 AM UTC
+    # 22 PM Mendoza = 01 AM UTC (del día siguiente)
+    # Ajusta estos valores según la hora de tu servidor de Streamlit (generalmente UTC)
+    
+    # Asumiendo servidor UTC (Streamlit Cloud):
+    schedule.every().day.at("10:00").do(tarea_manana) # 07:00 AR
+    schedule.every().day.at("01:00").do(tarea_noche)  # 22:00 AR
+    
+    # Loop híbrido: Chequea horarios y mantiene vivo el bot
     while True:
-        # Obtener hora Mendoza
-        now_mza = datetime.now(pytz.timezone('America/Argentina/Mendoza'))
-        
-        # Configura aquí tu hora deseada (ej: 08:00)
-        if now_mza.hour == 8 and now_mza.minute == 0:
-            print("⏰ Hora del briefing automático...")
-            ok, msg = enviar_briefing_diario()
-            print(f"Resultado Auto: {msg}")
-            
-            # Dormir 65 segundos para no enviar doble en el mismo minuto
-            time.sleep(65)
-        
-        # Revisar cada 30 segundos
-        time.sleep(30)
+        try:
+            schedule.run_pending()
+            # Polling con timeout para permitir que el loop gire y revise el schedule
+            bot.polling(none_stop=True, interval=0, timeout=20)
+        except Exception as e:
+            time.sleep(5) # Esperar antes de reintentar si el bot crashea
 
-# Iniciamos el thread solo una vez al arrancar la app
-if 'scheduler_started' not in st.session_state:
-    # Daemon=True significa que si cierras la app, el thread muere (seguridad)
-    t = threading.Thread(target=background_scheduler, daemon=True)
+# Arrancar en segundo plano (Solo una vez)
+if 'bot_active' not in st.session_state:
+    st.session_state['bot_active'] = True
+    t = threading.Thread(target=run_scheduler_and_bot, daemon=True)
     t.start()
-    st.session_state['scheduler_started'] = True
-    print("✅ Sistema de automatización activado en segundo plano.")
+    st.toast("🤖 Bot de Telegram Interactivo Iniciado")
