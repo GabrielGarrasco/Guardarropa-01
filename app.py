@@ -16,6 +16,7 @@ from sklearn.preprocessing import LabelEncoder
 import calendar
 import altair as alt
 import colorsys
+import telebot
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="GDI: Mendoza Ops v21.0", layout="centered", page_icon="🧥")
@@ -1577,7 +1578,6 @@ import time
 import threading
 
 # Inicializar Bot
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 def generar_teclado_ocasiones():
     """Crea los botones para elegir la ocasión a las 7 AM"""
