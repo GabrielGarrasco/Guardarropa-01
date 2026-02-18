@@ -292,10 +292,65 @@ def recommend_outfit(df, weather, occasion, seed):
             coat_msg = "☀️ No hace falta abrigo hoy."
             needs_coat = False
 
-    primary_occ = [occasion]
-    fallback_occ = []
-    if occasion == 'D': primary_occ = ['D']; fallback_occ = ['C'] 
-    elif occasion == 'F': primary_occ = ['F']; fallback_occ = ['U'] 
+    # --- LÓGICA CORREGIDA (ESTRICTA) ---
+    def get_best(cats, category_type):
+        curr_s = get_current_season()
+        
+        # Filtro 1: Categoría + OCASIÓN EXACTA + Temporada (o Toda estación)
+        pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'] == occasion) & ((usable_df['Season'] == curr_s) | (usable_df['Season'] == 'T'))]
+        
+        # Filtro 2: Si no hay de temporada, busca cualquier temporada, PERO MANTIENE LA OCASIÓN EXACTA
+        if pool.empty: pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'] == occasion)]
+        
+        # Se eliminaron las líneas que permitían mezclar ocasiones (fallbacks)
+        
+        if pool.empty: return None
+        
+        cands = []
+        for _, r in pool.iterrows():
+            sna = decodificar_sna(r['Code'])
+            if not sna: continue
+            match = False
+            if category_type == 'bot':
+                attr = sna['attr']
+                if t_max > 27: match = attr in ['Sh', 'DC', 'Ve']
+                elif t_max < 15: match = attr in ['Je', 'DL', 'Ve']
+                else: match = True 
+            elif category_type == 'top':
+                attr = sna['attr']
+                if t_max > 30: match = attr in ['00', '01']
+                elif t_max < 18: match = attr == '02'
+                else: match = True
+            elif category_type == 'out':
+                if not needs_coat: match = False 
+                else:
+                    try:
+                        lvl = int(sna['attr'])
+                        match = (t_min < 10 and lvl >= 3) or (t_min < 16 and lvl in [2, 3]) or (t_min < 22 and lvl == 1)
+                    except: match = False
+            if match: cands.append(r)
+        
+        f_pool = pd.DataFrame(cands) if cands else pool
+        nb = f_pool[~f_pool['Code'].isin(blacklist)]
+        candidates_df = nb if not nb.empty else f_pool
+        if candidates_df.empty: return None
+
+        try:
+            candidates_df = candidates_df.copy()
+            candidates_df['AI_Score'] = candidates_df.apply(lambda x: calculate_smart_score(x, t_curr, occasion, fb), axis=1)
+            candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df.apply(lambda x: random.uniform(-5, 5), axis=1)
+            return candidates_df.sort_values('Final_Score', ascending=False).iloc[0]
+        except: return candidates_df.sample(1, random_state=seed).iloc[0]
+
+    top = get_best(['Remera', 'Camisa'], 'top'); 
+    if top is not None: final.append(top)
+    bot = get_best(['Pantalón'], 'bot'); 
+    if bot is not None: final.append(bot)
+    if needs_coat:
+        out = get_best(['Campera', 'Buzo'], 'out')
+        if out is not None: final.append(out)
+        
+    return pd.DataFrame(final), t_feel, coat_msg 
 
     def get_best(cats, category_type):
         curr_s = get_current_season()
