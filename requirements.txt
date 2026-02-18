@@ -1,9 +1,9 @@
 streamlit
 pandas
 requests
-pytz
-Pillow
 gspread
 oauth2client
 scikit-learn
-numpy
+altair
+Pillow
+pytz
