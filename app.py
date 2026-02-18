@@ -4,7 +4,7 @@ import requests
 import os
 import pytz
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from PIL import Image, ImageOps
 from io import BytesIO
 import gspread
@@ -14,9 +14,10 @@ import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import LabelEncoder
 import calendar
+import altair as alt # Necesario para los nuevos gráficos
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v18.0", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v19.0", layout="centered", page_icon="🧥")
 
 # ==========================================
 # --- MOTOR DE INTELIGENCIA ARTIFICIAL ---
@@ -146,13 +147,10 @@ def cargar_imagen_desde_url(url):
         if response.status_code == 200: return Image.open(BytesIO(response.content))
     except: return None
 
-# --- NUEVO: EXTRACTOR DE COLOR SIMPLE ---
 def estimar_color_dominante(image):
     try:
-        # Reducimos a 1 pixel para sacar el promedio
         img_small = image.resize((1, 1))
         color = img_small.getpixel((0, 0))
-        # Retornamos Hex
         return '#{:02x}{:02x}{:02x}'.format(color[0], color[1], color[2])
     except: return "#000000"
 
@@ -161,7 +159,6 @@ def decodificar_sna(codigo):
         c = str(codigo).strip()
         if len(c) < 4: return None
         season = c[0]
-        # Detectar tipo y offset
         if len(c) > 2 and c[1:3] == 'CS': 
             tipo = 'CS' 
             offset = 3
@@ -170,9 +167,7 @@ def decodificar_sna(codigo):
             offset = 2
         
         attr = c[offset:offset+2]
-        # Intentamos sacar el color si el código sigue el estándar v17
-        # Estructura: Temp(1) + Tipo(1/2) + Attr(2) + Occ(1) + Col(2)
-        color_code = "99" # Default
+        color_code = "99" 
         try:
             occ_idx = offset + 2
             col_idx = occ_idx + 1
@@ -189,7 +184,6 @@ def get_limit_for_item(category, sna):
     elif category in ['Remera', 'Camisa']: return LIMITES_USO.get(sna['tipo'], 1)
     return LIMITES_USO.get(sna['tipo'], 3)
 
-# --- NUEVO: MATRIZ DE COLORES ---
 def check_harmony(code_top, code_bot):
     s_top = decodificar_sna(code_top)
     s_bot = decodificar_sna(code_bot)
@@ -198,12 +192,11 @@ def check_harmony(code_top, code_bot):
     c_t = s_top.get('color', '99')
     c_b = s_bot.get('color', '99')
     
-    # Lista negra de combinaciones (Tops -> Bots prohibidos)
     forbidden = {
-        '02': ['04', '09'], # Negro no va con Azul(04) o Marron(09) estricto
-        '04': ['02'],       # Azul no va con Negro
-        '06': ['05', '11'], # Rojo no va con Verde o Naranja
-        '09': ['02']        # Marron no va con Negro
+        '02': ['04', '09'], 
+        '04': ['02'],       
+        '06': ['05', '11'], 
+        '09': ['02']        
     }
     
     if c_b in forbidden.get(c_t, []): return False
@@ -249,7 +242,6 @@ def get_weather_emoji(code):
     if code >= 51: return "☔"
     return "☁️"
 
-# --- NUEVO: CANVAS BUILDER ---
 def create_outfit_canvas(top_code, bot_code, out_code, df_inv):
     try:
         imgs = []
@@ -264,7 +256,6 @@ def create_outfit_canvas(top_code, bot_code, out_code, df_inv):
         
         if not imgs: return None
 
-        # Redimensionar todas al ancho mínimo para consistencia
         min_width = 300
         resized_imgs = []
         for i in imgs:
@@ -332,18 +323,10 @@ def is_needs_wash(row):
     except: return False
 
 def get_thermal_offset(feedback_df):
-    # NUEVO: Calcula offset personalizado
-    if feedback_df.empty: return 3 # Default +3
+    if feedback_df.empty: return 3 
     try:
-        # Si el rating de abrigo promedio es bajo (<4), el usuario suele tener frio -> Aumentar offset
-        # Si el rating es alto (>5), el usuario suele tener calor -> Bajar offset
         avg_abrigo = pd.to_numeric(feedback_df['Rating_Abrigo'], errors='coerce').mean()
         if pd.isna(avg_abrigo): return 3
-        
-        # Formula inversa simple: 
-        # Si avg es 4 (ideal) -> offset = 3
-        # Si avg es 2 (frio) -> offset = 5
-        # Si avg es 6 (calor) -> offset = 1
         custom_offset = 3 + (4 - avg_abrigo)
         return custom_offset
     except: return 3
@@ -363,7 +346,15 @@ def recommend_outfit(df, weather, occasion, seed):
             blacklist = set(rej['Top'].dropna().tolist() + rej['Bottom'].dropna().tolist() + rej['Outer'].dropna().tolist())
     except: pass
     
-    # --- OFFSET TERMICO PERSONALIZADO ---
+    # --- AGENDA BLOCKER (Nuevo) ---
+    if 'agenda_reserves' in st.session_state:
+        today_date = get_mendoza_time().date()
+        for res_date, codes in st.session_state['agenda_reserves'].items():
+            # Si hay una reserva FUTURA, bloqueamos esos items hoy para que no se usen/ensucien
+            if res_date > today_date:
+                blacklist.update(codes)
+            # Si la reserva es HOY, forzamos la sugerencia (esto se maneja en UI, aqui solo evitamos conflictos)
+
     personal_offset = get_thermal_offset(fb)
     t_curr = weather['temp']
     t_max = weather['max']
@@ -409,7 +400,6 @@ def recommend_outfit(df, weather, occasion, seed):
             sna = decodificar_sna(r['Code'])
             if not sna: continue
             
-            # --- FILTRO MATRIX COLOR ---
             if selected_partner_code:
                 if not check_harmony(r['Code'], selected_partner_code):
                     continue
@@ -446,20 +436,18 @@ def recommend_outfit(df, weather, occasion, seed):
             return candidates_df.sort_values('Final_Score', ascending=False).iloc[0]
         except: return candidates_df.sample(1, random_state=seed).iloc[0]
 
-    # Orden de selección: Primero Bottom (base), luego Top (que combine), luego Outer
     bot = get_best(['Pantalón'], 'bot'); 
     top = None
     if bot is not None:
         final.append(bot)
         top = get_best(['Remera', 'Camisa'], 'top', selected_partner_code=bot['Code'])
     else:
-        # Si no hay pantalon, busca top independiente
         top = get_best(['Remera', 'Camisa'], 'top')
     
     if top is not None: final.append(top)
     
     if needs_coat:
-        out = get_best(['Campera', 'Buzo'], 'out') # Abrigo suele ser neutro, no chequeo color estricto
+        out = get_best(['Campera', 'Buzo'], 'out') 
         if out is not None: final.append(out)
         
     return pd.DataFrame(final), t_feel, coat_msg
@@ -468,7 +456,7 @@ def recommend_outfit(df, weather, occasion, seed):
 # --- INTERFAZ PRINCIPAL ---
 # ==========================================
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v18.0 - AI Enhanced")
+st.sidebar.caption("v19.0 - AI Full Suite")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -533,15 +521,20 @@ if 'custom_overrides' not in st.session_state: st.session_state['custom_override
 if 'change_mode' not in st.session_state: st.session_state['change_mode'] = False
 if 'confirm_stage' not in st.session_state: st.session_state['confirm_stage'] = 0 
 if 'alerts_buffer' not in st.session_state: st.session_state['alerts_buffer'] = []
+if 'agenda_reserves' not in st.session_state: st.session_state['agenda_reserves'] = {}
 
 weather = get_weather_open_meteo()
 
 # --- TABS ---
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Viaje"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Viaje", "📅 Agenda"])
 
 with tab1:
     today_str = get_mendoza_time().strftime("%Y-%m-%d")
     outfit_of_the_day = None
+    
+    # Revisar Agenda de HOY
+    reserved_today_codes = st.session_state['agenda_reserves'].get(get_mendoza_time().date(), [])
+    
     if not st.session_state['change_mode']:
         try:
             fb = load_feedback_gsheet()
@@ -551,7 +544,11 @@ with tab1:
                 match = accepted[(accepted['Date'].str.contains(today_str, na=False)) & (accepted['Occasion'] == code_occ)]
                 if not match.empty: outfit_of_the_day = match.iloc[-1]
         except: pass
+    
     coat_advice = ""
+    recs_df = pd.DataFrame()
+    temp_calculada = weather['temp']
+
     if outfit_of_the_day is not None:
         st.success(f"✅ Esta es tu prenda de hoy para '{code_occ}'")
         st.info("Ya registraste este outfit. Para generar uno nuevo, toca 'Cambiar'.")
@@ -562,6 +559,10 @@ with tab1:
         recs_df = df[df['Code'].isin(codes_to_show)]
         temp_calculada = float(outfit_of_the_day['User_Adj_Temp'])
         _, _, coat_advice = recommend_outfit(df, weather, code_occ, 0)
+    elif reserved_today_codes:
+        st.info("📅 Tienes un outfit reservado para hoy en la Agenda.")
+        recs_df = df[df['Code'].isin(reserved_today_codes)]
+        _, temp_calculada, coat_advice = recommend_outfit(df, weather, code_occ, 0)
     else:
         recs_df, temp_calculada, coat_advice = recommend_outfit(df, weather, code_occ, st.session_state['seed'])
 
@@ -616,7 +617,6 @@ with tab1:
     selected_items_codes = []
 
     if not recs_df.empty:
-        # Extraer códigos
         t_row = recs_df[recs_df['Category'].isin(['Remera', 'Camisa'])]
         b_row = recs_df[recs_df['Category'] == 'Pantalón']
         o_row = recs_df[recs_df['Category'].isin(['Campera', 'Buzo'])]
@@ -629,7 +629,6 @@ with tab1:
         if not b_row.empty: selected_items_codes.append(b_row.iloc[0])
         if not o_row.empty: selected_items_codes.append(o_row.iloc[0])
 
-        # --- CANVAS VISUAL ---
         st.markdown("###### 📸 Visual Canvas")
         canvas = create_outfit_canvas(rec_top, rec_bot, rec_out, df)
         if canvas:
@@ -638,7 +637,6 @@ with tab1:
             st.info("No se pudo generar el canvas visual (faltan fotos).")
         st.divider()
 
-        # Detalle texto
         c1, c2, c3 = st.columns(3)
         with c1: 
             st.caption("Torso")
@@ -746,11 +744,52 @@ with tab1:
 
 with tab2: 
     st.header("Lavadero")
+    
+    # --- SMART LAUNDRY ---
+    with st.expander("🧠 Smart Laundry (Sugerencia IA)", expanded=True):
+        if not df.empty:
+            # 1. Identificar sucio y limpio
+            dirty_pool = df[df['Status'].isin(['Sucio', 'Lavando'])]
+            clean_pool = df[df['Status'] == 'Limpio']
+            
+            if dirty_pool.empty:
+                st.success("¡Nada que lavar!")
+            else:
+                # 2. Calcular Escasez por Categoría
+                total_counts = df['Category'].value_counts()
+                clean_counts = clean_pool['Category'].value_counts()
+                
+                recommendations = []
+                for _, row in dirty_pool.iterrows():
+                    cat = row['Category']
+                    code = row['Code']
+                    # Escasez Score (0 a 10): Si tengo pocas limpias de esta categoria, score alto
+                    total_c = total_counts.get(cat, 1)
+                    clean_c = clean_counts.get(cat, 0)
+                    scarcity_ratio = 1 - (clean_c / total_c) # 1 si no hay limpias
+                    scarcity_score = scarcity_ratio * 10
+                    
+                    # Favorito Score (0 a 5): Basado en AI feedback si existe, sino random pequeño
+                    fav_score = 0
+                    if 'fb_side' in locals() and not fb_side.empty:
+                         # Buscar rating promedio de este item
+                         pass # Simplificacion: Usamos random para demo si no hay data suficiente
+                    
+                    final_wash_score = scarcity_score + fav_score + random.uniform(0, 2)
+                    recommendations.append({'Code': code, 'Category': cat, 'Score': final_wash_score})
+                
+                # Top 5 a lavar
+                recs_wash_df = pd.DataFrame(recommendations).sort_values('Score', ascending=False).head(5)
+                st.info("💡 La IA sugiere lavar esto prioritariamente (por escasez de limpias):")
+                for _, r in recs_wash_df.iterrows():
+                    st.write(f"• **{r['Category']}** `{r['Code']}`")
+    
+    st.divider()
     dirty_list = df[df.apply(is_needs_wash, axis=1)]
     st.subheader(f"🧺 Canasto de Ropa Sucia ({len(dirty_list)})")
     if not dirty_list.empty: st.dataframe(dirty_list[['Code', 'Category', 'Uses', 'Status']], use_container_width=True)
     else: st.info("Todo impecable ✨")
-    st.divider()
+    
     with st.container(border=True):
         col_input, col_btn = st.columns([3, 1])
         with col_input:
@@ -769,31 +808,42 @@ with tab2:
                             df.at[idx, 'Status'] = 'Sucio'; st.session_state['inventory'] = df; save_data_gsheet(df); st.toast(f"🧺 {code_clean} marcada como sucia."); st.rerun()
                     elif btn_lavar or btn_sucio: st.error("❌ Código no existe.")
     
-    with st.expander("🛠️ Quitar/Agregar Uso Manual"):
-        c_u_input, c_u_btns = st.columns([2, 2])
-        with c_u_input: code_mod = st.text_input("Código para modif. usos", key="cmd_uses")
-        with c_u_btns:
-            b_add = st.button("➕ Sumar Uso", use_container_width=True)
-            b_sub = st.button("➖ Restar Uso", use_container_width=True)
-        if code_mod:
-            clean_code = code_mod.strip()
-            if clean_code in df['Code'].astype(str).values:
-                idx = df[df['Code'] == clean_code].index[0]
-                current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
-                if b_add: df.at[idx, 'Uses'] = current_uses + 1; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d"); st.session_state['inventory'] = df; save_data_gsheet(df); st.toast(f"📈 {clean_code}: Usos subidos a {current_uses + 1}"); st.rerun()
-                if b_sub: new_uses = max(0, current_uses - 1); df.at[idx, 'Uses'] = new_uses; st.session_state['inventory'] = df; save_data_gsheet(df); st.toast(f"📉 {clean_code}: Usos bajados a {new_uses}"); st.rerun()
-            elif b_add or b_sub: st.error(f"Código '{clean_code}' no encontrado.")
     edited_laundry = st.data_editor(df[['Code', 'Category', 'Status', 'Uses']], key="ed_lav", column_config={"Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True)}, hide_index=True, disabled=["Code", "Category", "Uses"], use_container_width=True)
     if st.button("🔄 Actualizar Planilla"):
         df.update(edited_laundry)
-        for idx in df.index:
-            if df.at[idx, 'Status'] == 'Lavando' and (pd.isna(df.at[idx, 'LaundryStart']) or df.at[idx, 'LaundryStart'] == ''): df.at[idx, 'LaundryStart'] = datetime.now().isoformat(); df.at[idx, 'Uses'] = 0
-            elif df.at[idx, 'Status'] == 'Sucio': df.at[idx, 'Uses'] = 0; df.at[idx, 'LaundryStart'] = ''
-            elif df.at[idx, 'Status'] == 'Limpio': df.at[idx, 'LaundryStart'] = ''
         st.session_state['inventory'] = df; save_data_gsheet(df); st.success("Actualizado")
 
 with tab3: 
     st.header("Inventario Total")
+    
+    # --- JUEGO: SI LA PERDIERA ---
+    with st.expander("🎲 Juego: ¿Si la perdiera?"):
+        st.caption("La IA elige una prenda al azar. Si la perdieras hoy, ¿la comprarías de nuevo?")
+        if st.button("🔄 Jugar"):
+            clean_items = df[df['Status'] == 'Limpio']
+            if not clean_items.empty:
+                random_item = clean_items.sample(1).iloc[0]
+                st.session_state['lost_game_item'] = random_item
+            else: st.warning("No hay items limpios.")
+            
+        if 'lost_game_item' in st.session_state:
+            item = st.session_state['lost_game_item']
+            col_img, col_info = st.columns(2)
+            with col_img:
+                img = cargar_imagen_desde_url(item['ImageURL'])
+                if img: st.image(img, width=150)
+                else: st.write("📷 Sin foto")
+            with col_info:
+                st.markdown(f"**{item['Category']}**")
+                st.caption(f"`{item['Code']}`")
+                c_y, c_n = st.columns(2)
+                if c_y.button("✅ Sí, la compro"):
+                    st.toast("¡Bien! Es una prenda valiosa.")
+                    del st.session_state['lost_game_item']; st.rerun()
+                if c_n.button("❌ No, chau"):
+                    st.error(f"Considera donar: {item['Code']}")
+                    del st.session_state['lost_game_item']; st.rerun()
+    
     edited_inv = st.data_editor(df, num_rows="dynamic", use_container_width=True, column_config={"Uses": st.column_config.ProgressColumn("Desgaste", min_value=0, max_value=10, format="%d"), "ImageURL": st.column_config.LinkColumn("Foto")})
     if st.button("💾 Guardar Inventario Completo"): st.session_state['inventory'] = edited_inv; save_data_gsheet(edited_inv); st.toast("Guardado")
 
@@ -832,38 +882,61 @@ with tab4:
             st.session_state['inventory'] = pd.concat([df, new], ignore_index=True); save_data_gsheet(st.session_state['inventory']); st.success(f"¡{code} subido a Google Sheets!")
 
 with tab5:
-    st.header("📊 Estadísticas Completas")
+    st.header("📊 Estadísticas Avanzadas")
     if not df.empty:
-        total_items = len(df)
-        items_needs_wash = df[df.apply(is_needs_wash, axis=1)]
-        rate_dirty = len(items_needs_wash) / total_items if total_items > 0 else 0
-        st.caption("🧺 Estado del Lavadero (Real)")
-        st.progress(rate_dirty, text=f"Suciedad: {int(rate_dirty*100)}% ({total_items - len(items_needs_wash)} Limpias | {len(items_needs_wash)} Sucias)")
-    st.divider()
-    c_s1, c_s2 = st.columns(2)
-    with c_s1:
-        st.subheader("🔥 Top 5 Más Usadas")
-        if not df.empty:
-            df['Uses'] = pd.to_numeric(df['Uses'], errors='coerce').fillna(0)
-            st.dataframe(df.sort_values(by='Uses', ascending=False).head(5)[['Code', 'Category', 'Uses']], hide_index=True, use_container_width=True)
-    with c_s2:
-        st.subheader("👻 Prendas Muertas")
-        st.caption(">90 días sin uso")
-        def is_dead_stock(row):
-            try:
-                if str(row.get('Status', '')) != 'Limpio': return False
-                raw_date = str(row.get('LastWorn', ''))
-                if raw_date.lower() in ['', 'nan', 'none', 'n/a']: return False
-                last_date = pd.to_datetime(raw_date, errors='coerce')
-                if pd.isna(last_date): return False
-                return (datetime.now() - last_date).days > 90
-            except: return False
-        if not df.empty:
-            mask = df.apply(is_dead_stock, axis=1).fillna(False).astype(bool)
-            dead_df = df[mask]
-            if not dead_df.empty: st.dataframe(dead_df[['Category', 'Code']], hide_index=True, use_container_width=True)
-            else: st.success("¡Rotación impecable!")
-    
+        df['Uses'] = pd.to_numeric(df['Uses'], errors='coerce').fillna(0)
+        
+        # 1. Principio de Pareto (80/20)
+        st.subheader("1. Principio de Pareto")
+        total_uses = df['Uses'].sum()
+        if total_uses > 0:
+            sorted_items = df.sort_values('Uses', ascending=False)
+            sorted_items['Cumulative_Uses'] = sorted_items['Uses'].cumsum()
+            top_80 = sorted_items[sorted_items['Cumulative_Uses'] <= (0.8 * total_uses)]
+            count_80 = len(top_80)
+            total_items = len(df)
+            perc_items = (count_80 / total_items) * 100
+            st.write(f"Usas el **{perc_items:.1f}%** de tu armario para el **80%** de tus outfits.")
+            st.progress(min(1.0, perc_items/100))
+        else: st.info("Falta data de uso.")
+
+        # 2. Rueda de Colores
+        st.subheader("2. Rueda de Colores")
+        df['Color_Code'] = df['Code'].apply(lambda x: decodificar_sna(x)['color'] if decodificar_sna(x) else 'Unknown')
+        color_counts = df['Color_Code'].value_counts().reset_index()
+        color_counts.columns = ['Color', 'Count']
+        st.bar_chart(color_counts.set_index('Color'))
+        
+        # 3. MVP vs Suplentes
+        st.subheader("3. MVP vs Suplentes")
+        c_mvp1, c_mvp2 = st.columns(2)
+        with c_mvp1:
+            st.markdown("**🏆 MVP (Más usados)**")
+            st.dataframe(df.sort_values('Uses', ascending=False).head(3)[['Code', 'Category', 'Uses']], hide_index=True)
+        with c_mvp2:
+            st.markdown("**💤 Suplentes (0 uso y limpios)**")
+            suplentes = df[(df['Uses'] == 0) & (df['Status'] == 'Limpio')]
+            st.dataframe(suplentes.head(3)[['Code', 'Category']], hide_index=True)
+
+        # 4. Tendencia Flow/Comfort
+        st.subheader("4. Tendencia Flow vs Comfort")
+        try:
+            fb_trend = load_feedback_gsheet()
+            if not fb_trend.empty:
+                fb_trend['Date'] = pd.to_datetime(fb_trend['Date'])
+                fb_trend['Week'] = fb_trend['Date'].dt.to_period('W').apply(lambda r: r.start_time)
+                
+                weekly = fb_trend.groupby('Week')[['Rating_Comodidad', 'Rating_Seguridad']].mean().reset_index()
+                
+                chart_data = weekly.melt('Week', var_name='Metric', value_name='Rating')
+                c = alt.Chart(chart_data).mark_line(point=True).encode(
+                    x='Week',
+                    y=alt.Y('Rating', scale=alt.Scale(domain=[1, 5])),
+                    color='Metric'
+                ).interactive()
+                st.altair_chart(c, use_container_width=True)
+        except: st.warning("Falta data histórica.")
+
     st.divider()
     st.subheader("📅 Calendario de Outfits")
     try:
@@ -875,7 +948,6 @@ with tab5:
             current_year = now.year
             cal = calendar.monthcalendar(current_year, current_month)
             
-            # Simple Grid Visualization
             cols_cal = st.columns(7)
             days = ["L", "M", "Mi", "J", "V", "S", "D"]
             for i, d in enumerate(days): cols_cal[i].write(f"**{d}**")
@@ -1000,3 +1072,30 @@ with tab6:
         essentials = ["DNI / Pasaporte", "Cargador", "Cepillo Dientes", "Desodorante", "Auriculares", "Medicamentos", "Lentes", "Billetera"]
         cols_ch = st.columns(2)
         for i, item in enumerate(essentials): cols_ch[i % 2].checkbox(item, key=f"check_{i}")
+
+with tab7:
+    st.header("📅 Agenda de Eventos")
+    st.info("Reserva outfits para fechas futuras. La IA no te sugerirá estas prendas antes de la fecha para que no se ensucien.")
+    
+    with st.form("agenda_form"):
+        date_res = st.date_input("Fecha del Evento", min_value=datetime.now())
+        codes_clean = df[df['Status'] == 'Limpio']['Code'].tolist()
+        codes_res = st.multiselect("Prendas a reservar", codes_clean)
+        if st.form_submit_button("Reservar Outfit"):
+            if date_res and codes_res:
+                st.session_state['agenda_reserves'][date_res] = codes_res
+                st.success(f"Outfit reservado para el {date_res}")
+                st.rerun()
+            else: st.error("Selecciona fecha y prendas.")
+            
+    st.subheader("Tus Reservas Activas")
+    if st.session_state['agenda_reserves']:
+        for d, codes in st.session_state['agenda_reserves'].items():
+            with st.container(border=True):
+                st.markdown(f"**{d}**")
+                st.write(f"Prendas: {', '.join(codes)}")
+                if st.button("Cancelar", key=f"del_{d}"):
+                    del st.session_state['agenda_reserves'][d]
+                    st.rerun()
+    else:
+        st.caption("No hay eventos futuros.")
