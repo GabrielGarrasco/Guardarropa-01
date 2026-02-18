@@ -1741,3 +1741,8 @@ if 'bot_active' not in st.session_state:
     t = threading.Thread(target=run_scheduler_and_bot, daemon=True)
     t.start()
     st.toast("🤖 Bot de Telegram Interactivo Iniciado")
+# --- DEBUGGING: BOTÓN PARA FORZAR EL MENSAJE AHORA ---
+st.sidebar.divider()
+if st.sidebar.button("🧪 TESTEAR FLUJO 7 AM"):
+    tarea_manana()  # Esto simula que son las 7 de la mañana
+    st.toast("🔔 ¡Revisá tu Telegram ahora!")
