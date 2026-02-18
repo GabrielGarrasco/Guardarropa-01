@@ -292,17 +292,20 @@ def recommend_outfit(df, weather, occasion, seed):
             coat_msg = "☀️ No hace falta abrigo hoy."
             needs_coat = False
 
-    # --- LÓGICA CORREGIDA (ESTRICTA) ---
+    # Definimos qué ocasiones se pueden mezclar
+    # Si es F o U, buscamos en ambas. Si es otra cosa, busca estricto.
+    target_occs = [occasion]
+    if occasion in ['F', 'U']:
+        target_occs = ['F', 'U'] # Permite compartir ropa entre Formal y Universidad
+
     def get_best(cats, category_type):
         curr_s = get_current_season()
         
-        # Filtro 1: Categoría + OCASIÓN EXACTA + Temporada (o Toda estación)
-        pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'] == occasion) & ((usable_df['Season'] == curr_s) | (usable_df['Season'] == 'T'))]
+        # Filtro: Categoría + (Ocasión actual O compartida) + Temporada
+        pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occs)) & ((usable_df['Season'] == curr_s) | (usable_df['Season'] == 'T'))]
         
-        # Filtro 2: Si no hay de temporada, busca cualquier temporada, PERO MANTIENE LA OCASIÓN EXACTA
-        if pool.empty: pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'] == occasion)]
-        
-        # Se eliminaron las líneas que permitían mezclar ocasiones (fallbacks)
+        # Respaldo: Misma lógica de ocasión (mezclada), pero cualquier temporada
+        if pool.empty: pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occs))]
         
         if pool.empty: return None
         
@@ -350,7 +353,7 @@ def recommend_outfit(df, weather, occasion, seed):
         out = get_best(['Campera', 'Buzo'], 'out')
         if out is not None: final.append(out)
         
-    return pd.DataFrame(final), t_feel, coat_msg 
+    return pd.DataFrame(final), t_feel, coat_msg
 
     def get_best(cats, category_type):
         curr_s = get_current_season()
@@ -427,47 +430,16 @@ if 'change_mode' not in st.session_state: st.session_state['change_mode'] = Fals
 if 'confirm_stage' not in st.session_state: st.session_state['confirm_stage'] = 0 
 if 'alerts_buffer' not in st.session_state: st.session_state['alerts_buffer'] = []
 
+# ... (código anterior donde defines df y weather) ...
+
 df = st.session_state['inventory']
 weather = get_weather_open_meteo()
 
-# --- SIDEBAR STATUS ---
-with st.sidebar:
-    st.divider()
-    with st.expander("🕴️ Estado", expanded=True):
-        try:
-            fb = load_feedback_gsheet()
-            last = None
-            found_outfit = False
-            today_str = get_mendoza_time().strftime("%Y-%m-%d")
-            if not fb.empty and 'Action' in fb.columns:
-                accepted = fb[fb['Action'] == 'Accepted'].copy()
-                accepted['Date'] = accepted['Date'].astype(str)
-                match_today_occ = accepted[(accepted['Date'].str.contains(today_str, na=False)) & (accepted['Occasion'] == code_occ)]
-                if not match_today_occ.empty:
-                    last = match_today_occ.iloc[-1]; st.success(f"✅ Registrado ({code_occ})"); found_outfit = True
-                else:
-                    match_any_today = accepted[accepted['Date'].str.contains(today_str, na=False)]
-                    if not match_any_today.empty: last = match_any_today.iloc[-1]; st.info(f"🕴️ Tienes puesto: ({last['Occasion']})"); found_outfit = True
-                if found_outfit and last is not None:
-                    def show_mini(code, label):
-                        if code and code != 'N/A' and code != 'nan':
-                            row = df[df['Code'] == code]
-                            if not row.empty:
-                                img = row.iloc[0]['ImageURL']
-                                if img and len(str(img)) > 5: st.image(cargar_imagen_desde_url(img), width=80)
-                                else: st.write(f"🏷️ {code}")
-                            else: st.write(f"{code}")
-                    c1, c2 = st.columns(2)
-                    with c1: show_mini(last['Top'], "Top")
-                    with c2: show_mini(last['Bottom'], "Bot")
-                    if last['Outer'] and last['Outer'] != 'N/A': show_mini(last['Outer'], "Out")
-                else: st.warning("⚠️ Nada registrado hoy")
-            else: st.warning("Sin datos.")
-        except: st.warning("Sin datos.")
+# (AQUI BORRASTE TODO EL BLOQUE "SIDEBAR STATUS")
 
 # --- TABS ---
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Viaje"])
-
+# ... (sigue el resto del programa) ...
 with tab1:
     today_str = get_mendoza_time().strftime("%Y-%m-%d")
     outfit_of_the_day = None
