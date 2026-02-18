@@ -1712,28 +1712,116 @@ def tarea_noche():
     except Exception as e:
         print(f"Error tarea noche: {e}")
 
+# ==========================================
+# --- MÓDULO SMART LAUNDRY BOT ---
+# ==========================================
+
+def crear_collage_lavanderia(codes, df_inv):
+    """Genera una imagen uniendo las fotos de las prendas seleccionadas"""
+    try:
+        imgs = []
+        for c in codes:
+            row = df_inv[df_inv['Code'] == c]
+            if not row.empty:
+                url = row.iloc[0]['ImageURL']
+                pil_img = cargar_imagen_desde_url(url)
+                if pil_img: 
+                    # Redimensionar para uniformidad
+                    base_width = 300
+                    w_percent = (base_width / float(pil_img.size[0]))
+                    h_size = int((float(pil_img.size[1]) * float(w_percent)))
+                    img_resized = pil_img.resize((base_width, h_size), Image.Resampling.LANCZOS)
+                    imgs.append(img_resized)
+        
+        if not imgs: return None
+
+        # Crear lienzo vertical
+        total_height = sum([i.size[1] for i in imgs])
+        canvas = Image.new('RGB', (300, total_height), (255, 255, 255))
+        
+        y_offset = 0
+        for i in imgs:
+            canvas.paste(i, (0, y_offset))
+            y_offset += i.size[1]
+            
+        return canvas
+    except: return None
+
+def tarea_lavanderia():
+    """Chequea si hay mucha ropa sucia y manda alerta"""
+    try:
+        df = load_data_gsheet()
+        if df.empty: return
+
+        # 1. Filtrar ropa sucia
+        dirty_pool = df[df['Status'].isin(['Sucio', 'Lavando'])]
+        if len(dirty_pool) < 4: 
+            return # No molestar si hay poca ropa sucia
+
+        # 2. Lógica Smart (Prioridad por Escasez)
+        clean_pool = df[df['Status'] == 'Limpio']
+        total_counts = df['Category'].value_counts()
+        clean_counts = clean_pool['Category'].value_counts()
+        
+        recs = []
+        for _, row in dirty_pool.iterrows():
+            cat = row['Category']
+            tot = total_counts.get(cat, 1)
+            cln = clean_counts.get(cat, 0)
+            scarcity = 1 - (cln / tot) # Más cerca de 1 = Más urgente
+            recs.append({'Code': row['Code'], 'Cat': cat, 'Score': scarcity})
+        
+        # Ordenar por urgencia y tomar el Top 5
+        top_urgente = sorted(recs, key=lambda x: x['Score'], reverse=True)[:5]
+        codes_to_wash = [x['Code'] for x in top_urgente]
+        
+        # 3. Generar Mensaje
+        msg = (
+            "🧺 *¡Hora de Lavar!*\n"
+            f"Tienes {len(dirty_pool)} prendas sucias acumuladas.\n\n"
+            "🧠 *Sugerencia Smart (Prioridad):*\n"
+        )
+        for item in top_urgente:
+            msg += f"• `{item['Code']}` ({item['Cat']})\n"
+        
+        msg += "\n_Entra a la app para marcar como 'Limpio'._"
+
+        # 4. Generar y Enviar Foto
+        canvas = crear_collage_lavanderia(codes_to_wash, df)
+        
+        if canvas:
+            bio = BytesIO()
+            canvas.save(bio, format='PNG')
+            bio.seek(0)
+            bot.send_photo(TELEGRAM_CHAT_ID, photo=bio, caption=msg, parse_mode='Markdown')
+        else:
+            bot.send_message(TELEGRAM_CHAT_ID, msg, parse_mode='Markdown')
+
+    except Exception as e:
+        print(f"Error lavanderia: {e}")
 # --- THREAD DE CONTROL ---
 def run_scheduler_and_bot():
     """Ejecuta el scheduler y el polling del bot simultáneamente"""
     
-    # Programar horarios (Hora del servidor, ojo con la zona horaria)
-    # Si el servidor está en UTC y Mendoza es UTC-3:
-    # 7 AM Mendoza = 10 AM UTC
-    # 22 PM Mendoza = 01 AM UTC (del día siguiente)
-    # Ajusta estos valores según la hora de tu servidor de Streamlit (generalmente UTC)
+    # 1. Rutina Diaria (Outfit) - 07:00 AM AR (10:00 UTC)
+    schedule.every().day.at("10:00").do(tarea_manana)
     
-    # Asumiendo servidor UTC (Streamlit Cloud):
-    schedule.every().day.at("10:00").do(tarea_manana) # 07:00 AR
-    schedule.every().day.at("01:00").do(tarea_noche)  # 22:00 AR
+    # 2. Rutina Nocturna (Check) - 22:00 PM AR (01:00 UTC)
+    schedule.every().day.at("01:00").do(tarea_noche)
     
-    # Loop híbrido: Chequea horarios y mantiene vivo el bot
+    # 3. Rutina Lavandería (Viernes y Domingos a la tarde)
+    # Viernes 18:00 AR (21:00 UTC) - Para tener ropa el finde
+    schedule.every().friday.at("21:00").do(tarea_lavanderia)
+    # Domingo 11:00 AR (14:00 UTC) - Para la semana
+    schedule.every().sunday.at("14:00").do(tarea_lavanderia)
+    
+    # Loop híbrido
     while True:
         try:
             schedule.run_pending()
-            # Polling con timeout para permitir que el loop gire y revise el schedule
             bot.polling(none_stop=True, interval=0, timeout=20)
         except Exception as e:
-            time.sleep(5) # Esperar antes de reintentar si el bot crashea
+            time.sleep(5)
 
 # Arrancar en segundo plano (Solo una vez)
 if 'bot_active' not in st.session_state:
@@ -1746,3 +1834,6 @@ st.sidebar.divider()
 if st.sidebar.button("🧪 TESTEAR FLUJO 7 AM"):
     tarea_manana()  # Esto simula que son las 7 de la mañana
     st.toast("🔔 ¡Revisá tu Telegram ahora!")
+if st.sidebar.button("🧺 TEST LAVANDERIA"):
+    tarea_lavanderia()
+    st.toast("Revisando canasto...")
