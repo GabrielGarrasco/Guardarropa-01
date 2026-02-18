@@ -15,10 +15,10 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import LabelEncoder
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v16.0 AI", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v17.0 AI", layout="centered", page_icon="🧥")
 
 # ==========================================
-# --- MOTOR DE INTELIGENCIA ARTIFICIAL (NUEVO) ---
+# --- MOTOR DE INTELIGENCIA ARTIFICIAL ---
 # ==========================================
 class OutfitAI:
     def __init__(self):
@@ -29,39 +29,32 @@ class OutfitAI:
 
     def train(self, feedback_df, inventory_df):
         """Entrena el modelo con tu historial de feedback"""
-        # Necesitamos un mínimo de datos para que no tire error
         if feedback_df.empty or len(feedback_df) < 5:
             return False 
         
         try:
             data = feedback_df.copy()
-            # Limpieza de datos
             data['Temp_Real'] = pd.to_numeric(data['Temp_Real'], errors='coerce').fillna(20)
             
-            # Calculamos el Score (Target) basado en tus estrellas
-            # Si rechazaste el outfit, el score es 0 (castigo fuerte)
+            # Score basado en Ratings. Si Action=Rejected, score es 0.
             data['Target_Score'] = data.apply(
                 lambda x: 0 if x['Action'] == 'Rejected' else 
                 ((float(x.get('Rating_Abrigo', 4)) + float(x.get('Rating_Comodidad', 3)) + float(x.get('Rating_Seguridad', 3))) / 15) * 100, 
                 axis=1
             )
 
-            # Preparamos filas de entrenamiento (desarmamos el outfit en prendas individuales)
             training_rows = []
             for _, row in data.iterrows():
                 context_temp = row['Temp_Real']
                 context_occ = row['Occasion']
                 score = row['Target_Score']
                 
-                # Iteramos por las 3 piezas del outfit
                 for part in ['Top', 'Bottom', 'Outer']:
                     code = row[part]
                     if code and code not in ['N/A', 'nan', 'None', '']:
-                        # Buscamos la categoría real en el inventario
                         cat_matches = inventory_df[inventory_df['Code'] == code]['Category'].values
                         cat_val = cat_matches[0] if len(cat_matches) > 0 else 'Unknown'
                         
-                        # Extraemos parte numérica del código para diferenciar items
                         code_num = int(''.join(filter(str.isdigit, str(code)))) if any(c.isdigit() for c in str(code)) else 0
 
                         training_rows.append({
@@ -75,18 +68,15 @@ class OutfitAI:
             df_train = pd.DataFrame(training_rows)
             if df_train.empty: return False
 
-            # Entrenamos los codificadores (LabelEncoders)
             self.le_occ.fit(df_train['Occasion'].unique())
-            self.le_cat.fit(df_train['Category'].unique()) # Fit con todas las categorías vistas
+            self.le_cat.fit(df_train['Category'].unique()) 
             
-            # Transformamos texto a números
             df_train['Occasion_Enc'] = self.le_occ.transform(df_train['Occasion'])
             df_train['Category_Enc'] = self.le_cat.transform(df_train['Category'])
             
             X = df_train[['Temp', 'Occasion_Enc', 'Category_Enc', 'Code_Numeric']]
             y = df_train['Score']
 
-            # Random Forest: Robusto y aprende relaciones no lineales
             self.model = RandomForestRegressor(n_estimators=100, random_state=42)
             self.model.fit(X, y)
             self.is_trained = True
@@ -97,35 +87,28 @@ class OutfitAI:
             return False
 
     def predict_score(self, item_row, current_temp, occasion_code):
-        """Predice cuánto te va a gustar una prenda hoy"""
         if not self.is_trained:
-            return 50.0 # Score neutral
+            return 50.0 
         
         try:
-            # Manejo de etiquetas desconocidas (si aparece una ocasión nueva)
             occ_str = str(occasion_code)
             occ_val = self.le_occ.transform([occ_str])[0] if occ_str in self.le_occ.classes_ else 0
             
             cat_str = str(item_row['Category'])
-            # Si la categoría no se vio en el entrenamiento, usamos la clase 0 por defecto
             cat_val = self.le_cat.transform([cat_str])[0] if cat_str in self.le_cat.classes_ else 0
             
             code_num = int(''.join(filter(str.isdigit, str(item_row['Code'])))) if any(c.isdigit() for c in str(item_row['Code'])) else 0
 
-            # Predicción
             features = np.array([[current_temp, occ_val, cat_val, code_num]])
             predicted_score = self.model.predict(features)[0]
             
-            # Penalización por suciedad o sobreuso (Regla dura + IA)
             uses = int(float(item_row['Uses'])) if item_row['Uses'] not in ['', 'nan'] else 0
-            if uses > 2: predicted_score -= 15 # Bajamos puntos si está usada
+            if uses > 2: predicted_score -= 15 
             
             return predicted_score
         except Exception as e:
-            print(f"Error predicción: {e}")
             return 50.0
 
-# Inicializamos la IA en Session State
 if 'outfit_ai' not in st.session_state:
     st.session_state['outfit_ai'] = OutfitAI()
 
@@ -185,15 +168,7 @@ def save_feedback_entry_gsheet(entry):
 
 # --- CONSTANTES ---
 LIMITES_USO = {
-    "R": 2,   # Remeras
-    "Sh": 2,  # Shorts
-    "DC": 2,  # Deportivo Corto
-    "Je": 4,  # Jeans
-    "B": 4,   # Buzos
-    "CS": 1,  # Camisas
-    "Ve": 2,  # Vestir
-    "DL": 2,  # Deportivo Largo
-    "C": 5    # Campera
+    "R": 2, "Sh": 2, "DC": 2, "Je": 4, "B": 4, "CS": 1, "Ve": 2, "DL": 2, "C": 5
 }
 
 def get_mendoza_time():
@@ -291,26 +266,14 @@ def get_weather_emoji(code):
 # ==========================================
 
 def calculate_smart_score(item_row, current_temp, occasion, feedback_df):
-    """
-    Función Híbrida Inteligente:
-    1. Intenta usar Machine Learning (OutfitAI).
-    2. Si no hay modelo entrenado, usa Heurística (Promedios simples).
-    """
-    # Intentamos obtener la instancia de IA
     ai = st.session_state.get('outfit_ai')
-    
-    # Si la IA no está entrenada, intentamos entrenarla ahora (Lazy Loading)
     if ai and not ai.is_trained and not feedback_df.empty:
-        # Necesitamos el inventario para conocer las categorías de los items en el feedback
         inv_ref = st.session_state.get('inventory', pd.DataFrame())
         ai.train(feedback_df, inv_ref)
 
-    # --- MODO IA ---
     if ai and ai.is_trained:
         return ai.predict_score(item_row, current_temp, occasion)
 
-    # --- MODO CLÁSICO (FALLBACK) ---
-    # Esto se usa si tienes pocos datos (<5 feedback)
     item_code = item_row['Code']
     base_score = 50.0 
     if feedback_df.empty: return base_score
@@ -323,7 +286,6 @@ def calculate_smart_score(item_row, current_temp, occasion, feedback_df):
     if history.empty: return base_score
 
     try:
-        # Promedio simple de estrellas anteriores
         s_val = pd.to_numeric(history['Rating_Seguridad'], errors='coerce').mean()
         c_val = pd.to_numeric(history['Rating_Comodidad'], errors='coerce').mean()
         avg_rating = (s_val + c_val) / 2
@@ -355,10 +317,11 @@ def is_needs_wash(row):
     except: return False
 
 def recommend_outfit(df, weather, occasion, seed):
+    # Filtramos todo lo usable (LIMPIO)
     usable_df = df[df.apply(is_item_usable, axis=1)].copy()
     if usable_df.empty: return pd.DataFrame(), 0, ""
     
-    # 1. Filtro Blacklist (Rechazados hoy)
+    # 1. Filtro Blacklist
     blacklist = set()
     try:
         fb = load_feedback_gsheet()
@@ -376,7 +339,7 @@ def recommend_outfit(df, weather, occasion, seed):
     
     final = []
     
-    # 2. Lógica de Abrigo (Reglas duras de Clima)
+    # 2. Lógica de Abrigo
     coat_msg = ""
     needs_coat = False
     hourly_temps = weather.get('hourly_temp', [])
@@ -404,14 +367,40 @@ def recommend_outfit(df, weather, occasion, seed):
             coat_msg = "☀️ No hace falta abrigo hoy."
             needs_coat = False
 
-    target_occasions = [occasion]
-    if occasion == 'F': target_occasions = ['F', 'U']
+    # --- DEFINICIÓN DE OCASIONES Y REGLAS DE FALLBACK ---
+    # Si es deporte (D), buscamos estrictamente D. Si falla, buscamos C.
+    primary_occ = [occasion]
+    fallback_occ = []
+    
+    if occasion == 'D':
+        primary_occ = ['D']
+        fallback_occ = ['C'] # Regla solicitada: Si no hay deporte, usar casa.
+    elif occasion == 'F':
+        primary_occ = ['F']
+        fallback_occ = ['U'] # Fallback normal
 
     def get_best(cats, category_type):
         curr_s = get_current_season()
-        pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occasions)) & ((usable_df['Season'] == curr_s) | (usable_df['Season'] == 'T'))]
-        if pool.empty: pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occasions))]
-        if pool.empty: pool = usable_df[usable_df['Category'].isin(cats)]
+        
+        # 1. Intentar con Ocasión Primaria
+        pool = usable_df[
+            (usable_df['Category'].isin(cats)) & 
+            (usable_df['Occasion'].isin(primary_occ)) & 
+            ((usable_df['Season'] == curr_s) | (usable_df['Season'] == 'T'))
+        ]
+        
+        # Si está vacío, probar sin filtro de temporada (pero manteniendo ocasión estricta)
+        if pool.empty:
+            pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(primary_occ))]
+            
+        # 2. Si sigue vacío y estamos en Deporte, aplicar Fallback a CASA
+        if pool.empty and occasion == 'D' and fallback_occ:
+            pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(fallback_occ))]
+        
+        # 3. Fallback genérico para otros modos (U/F)
+        if pool.empty and occasion != 'D':
+             pool = usable_df[usable_df['Category'].isin(cats)]
+
         if pool.empty: return None
         
         cands = []
@@ -420,7 +409,7 @@ def recommend_outfit(df, weather, occasion, seed):
             if not sna: continue
             match = False
             
-            # Filtros duros por temperatura (para no recomendar short con nieve)
+            # Filtros duros por temperatura
             if category_type == 'bot':
                 attr = sna['attr']
                 if t_max > 27: 
@@ -459,32 +448,16 @@ def recommend_outfit(df, weather, occasion, seed):
 
         # --- SELECCIÓN INTELIGENTE (IA) ---
         try:
-            candidates_df = candidates_df.copy() # Evitar SettingWithCopy
-            candidates_df['LastWornDate'] = pd.to_datetime(candidates_df['LastWorn'], errors='coerce').fillna(pd.Timestamp('2000-01-01'))
-            
-            # Calculamos el Score IA para cada candidato
-            # Pasamos toda la fila (r) + temp actual + ocasion + historial
+            candidates_df = candidates_df.copy()
             candidates_df['AI_Score'] = candidates_df.apply(
                 lambda x: calculate_smart_score(x, t_curr, occasion, fb), 
                 axis=1
             )
-            
-            # Agregamos ruido aleatorio pequeño para variar si los scores son iguales
-            # random.uniform(-5, 5) da un margen de variación del 10% sobre 100
             candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df.apply(lambda x: random.uniform(-5, 5), axis=1)
-            
-            # Priorizamos los que llevan más tiempo sin usarse (LRU suave) dentro de los mejores scores
-            # Dividimos por días desde último uso para dar un bonus a lo viejo
-            # (Opcional, pero ayuda a rotar)
-            
-            # Ordenamos por Score final descendente
             final_candidates = candidates_df.sort_values('Final_Score', ascending=False)
-            
-            # Devolvemos el ganador
             return final_candidates.iloc[0]
 
         except Exception as e:
-            # Fallback si falla la IA: Selección Random
             return candidates_df.sample(1, random_state=seed).iloc[0]
 
     top = get_best(['Remera', 'Camisa'], 'top'); 
@@ -502,7 +475,7 @@ def recommend_outfit(df, weather, occasion, seed):
 # --- INTERFAZ PRINCIPAL ---
 # ==========================================
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v16.0 - Neural Engine 🧠")
+st.sidebar.caption("v17.0 - Neural Engine 🧠")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -956,8 +929,7 @@ with tab5:
             try:
                 last_date = datetime.fromisoformat(str(row['LastWorn']))
                 if (datetime.now() - last_date).days > 90: return True
-            except: return False
-            return False 
+            except: return False 
         dead_df = df[df.apply(is_dead_stock, axis=1)]
         if not dead_df.empty: st.dataframe(dead_df[['Category', 'Code']], hide_index=True, use_container_width=True)
         else: st.success("¡Rotación impecable!")
@@ -968,7 +940,6 @@ with tab6:
     with col_dest: dest_city = st.text_input("📍 Destino", value="Buenos Aires")
     with col_days: num_days = st.number_input("📅 Días Totales", min_value=1, max_value=30, value=5)
 
-    # --- NUEVO: Selector de días de deporte para cumplir el requisito de "Exclusivo Deportiva" ---
     num_sports = st.slider("🏋️ ¿Cuántos días harás deporte?", 0, num_days, 0)
 
     if 'travel_weather' not in st.session_state: st.session_state['travel_weather'] = None
@@ -997,77 +968,53 @@ with tab6:
     
     st.divider()
     if st.button("🎒 Generar Propuesta de Valija", type="primary", use_container_width=True):
-        # 1. Filtramos solo ropa limpia
         packable = df[df['Status'] == 'Limpio']
         forecast = st.session_state.get('travel_weather')
         
         if packable.empty: 
             st.error("¡No tenés ropa limpia para viajar!")
         else:
-            # --- Configuración de Cantidades ---
-            # Regla: 1 Pijama (Casa) + Ropa de Deporte (D) + Ropa de Salida (U/F)
-            
-            # Calculamos días "de calle" (restando deporte si es que te cambias exclusivamente para eso)
-            # Asumimos que la ropa de deporte es 1 cambio por día de deporte
             target_street_days = max(1, num_days - num_sports) 
             
-            # Cálculo de prendas necesarias
             req_daily_tops = target_street_days 
-            req_daily_bots = (target_street_days // 2) + 1 # Se repite pantalón cada 2 días
+            req_daily_bots = (target_street_days // 2) + 1 
             
             req_sport_tops = num_sports
-            req_sport_bots = num_sports # Asumimos 1 pantalón por sesión de deporte para no repetir sudor
+            req_sport_bots = num_sports
             
-            # --- CREACIÓN DE POOLS (FILTROS STRICTOS) ---
-            
-            # A. Pool CASA (Solo para dormir - 1 prenda/conjunto)
+            # --- POOLS ---
             pool_home = packable[packable['Occasion'] == 'C']
-            
-            # B. Pool DEPORTE (Estrictamente categoría 'D')
             pool_sport = packable[packable['Occasion'] == 'D']
-            
-            # C. Pool CALLE (Estrictamente 'U' o 'F')
             pool_street = packable[packable['Occasion'].isin(['U', 'F'])]
-            
-            # Pool Abrigos (General, tomamos de U, F o D neutros si es necesario, pero preferimos U/F)
             pool_outs = packable[(packable['Category'].isin(['Campera', 'Buzo'])) & (packable['Occasion'].isin(['U', 'F', 'D']))]
 
-            # --- FILTROS DE CLIMA (Solo afectan a Calle y Deporte) ---
+            # --- FILTROS DE CLIMA ---
             avg_max = st.session_state.get('travel_avg_max', 20) 
 
             if forecast:
-                if avg_max > 25: # Calor
-                    # En calle: Sacar Jeans pesados o deportivos largos si se colaron
+                if avg_max > 25: 
                     pool_street = pool_street[~pool_street['Code'].apply(lambda x: 'DL' in x)] 
-                    # En deporte: Preferir cortos
                     pool_sport = pool_sport[pool_sport['Code'].apply(lambda x: 'DC' in x or 'Sh' in x)]
-                    # Abrigos livianos
                     pool_outs = pool_outs[pool_outs['Code'].apply(lambda x: '04' not in x and '05' not in x)] 
-                elif avg_max < 15: # Frío
-                    # En calle: Sacar Shorts
+                elif avg_max < 15: 
                     pool_street = pool_street[~pool_street['Code'].apply(lambda x: 'Sh' in x or 'DC' in x)]
-                    # En deporte: Preferir largos
                     pool_sport = pool_sport[~pool_sport['Code'].apply(lambda x: 'DC' in x)]
-                    # Sacar musculosas
                     pool_street = pool_street[~pool_street['Code'].apply(lambda x: '00' in x)]
 
-            # --- SELECCIÓN (SAMPLING) ---
             final_pack = []
 
-            # 1. SELECCIÓN CASA (Solo 1 Top y 1 Bottom)
+            # 1. CASA
             try:
-                # Intenta buscar remera de casa
                 home_top = pool_home[pool_home['Category'].isin(['Remera', 'Camisa'])].sample(1)
                 final_pack.append(home_top)
             except: st.warning("No tienes remeras 'Casa' limpias para dormir.")
             
             try:
-                # Intenta buscar pantalón de casa
                 home_bot = pool_home[pool_home['Category'] == 'Pantalón'].sample(1)
                 final_pack.append(home_bot)
             except: st.warning("No tienes pantalones 'Casa' limpios para dormir.")
 
-            # 2. SELECCIÓN DEPORTE (Estrictamente D)
+            # 2. DEPORTE
             if req_sport_tops > 0:
                 avail_s_tops = pool_sport[pool_sport['Category'].isin(['Remera'])]
                 avail_s_bots = pool_sport[pool_sport['Category'] == 'Pantalón']
@@ -1078,22 +1025,19 @@ with tab6:
                 final_pack.append(avail_s_tops.sample(min(len(avail_s_tops), req_sport_tops)))
                 final_pack.append(avail_s_bots.sample(min(len(avail_s_bots), req_sport_bots)))
 
-            # 3. SELECCIÓN CALLE (Estrictamente U o F)
+            # 3. CALLE
             avail_u_tops = pool_street[pool_street['Category'].isin(['Remera', 'Camisa'])]
             avail_u_bots = pool_street[pool_street['Category'] == 'Pantalón']
             
-            # Rellenar tops de calle
             cnt_tops = min(len(avail_u_tops), req_daily_tops)
             final_pack.append(avail_u_tops.sample(cnt_tops))
             
-            # Rellenar bottoms de calle
             cnt_bots = min(len(avail_u_bots), req_daily_bots)
             final_pack.append(avail_u_bots.sample(cnt_bots))
 
-            # 4. ABRIGO (2 piezas random compatibles)
+            # 4. ABRIGO
             final_pack.append(pool_outs.sample(min(len(pool_outs), 2)))
 
-            # CONSOLIDAR
             if final_pack:
                 st.session_state['travel_pack'] = pd.concat(final_pack).drop_duplicates()
                 st.session_state['travel_selections'] = {} 
@@ -1107,7 +1051,6 @@ with tab6:
         st.divider()
         st.subheader(f"🧳 Tu Valija ({len(pack)} prendas)")
         
-        # Agrupación visual para confirmar que la lógica funciona
         st.caption("Distribución automática:")
         c_stats1, c_stats2, c_stats3 = st.columns(3)
         c_stats1.info(f"🏠 Casa (Dormir): {len(pack[pack['Occasion'] == 'C'])}")
@@ -1118,7 +1061,6 @@ with tab6:
         for i, (index, row) in enumerate(pack.iterrows()):
             with cols[i % 3]:
                 with st.container(border=True):
-                    # Etiqueta de ocasión para verificar visualmente
                     emoji_occ = "🏠" if row['Occasion'] == 'C' else "🏋️" if row['Occasion'] == 'D' else "🎓" if row['Occasion'] == 'U' else "👔"
                     
                     img = cargar_imagen_desde_url(row['ImageURL'])
@@ -1127,82 +1069,6 @@ with tab6:
                     st.markdown(f"**{emoji_occ} {row['Category']}**")
                     st.caption(f"Code: `{row['Code']}`")
                     
-                    c_ida, c_vuelta = st.columns(2)
-                    is_ida = c_ida.checkbox("Ida", key=f"ida_{row['Code']}")
-                    is_vuelta = c_vuelta.checkbox("Vuel", key=f"vuelta_{row['Code']}")
-                    if 'travel_selections' not in st.session_state: st.session_state['travel_selections'] = {}
-                    st.session_state['travel_selections'][row['Code']] = {'ida': is_ida, 'vuelta': is_vuelta}
-
-        st.divider()
-        sel = st.session_state.get('travel_selections', {})
-        ida_items = [code for code, vals in sel.items() if vals.get('ida')]
-        vuelta_items = [code for code, vals in sel.items() if vals.get('vuelta')]
-        c1, c2 = st.columns(2)
-        c1.info(f"🛫 **Ida:** {', '.join(ida_items) if ida_items else '---'}")
-        c2.success(f"🛬 **Vuelta:** {', '.join(vuelta_items) if vuelta_items else '---'}")
-        st.divider()
-        if st.button("🗑️ Borrar Valija y Empezar de Nuevo", type="secondary", use_container_width=True):
-            st.session_state['travel_pack'] = None; st.session_state['travel_selections'] = {}; st.rerun()
-
-    st.divider()
-    with st.expander("📋 Checklist de Supervivencia", expanded=False):
-        essentials = ["DNI / Pasaporte", "Cargador", "Cepillo Dientes", "Desodorante", "Auriculares", "Medicamentos", "Lentes", "Billetera"]
-        cols_ch = st.columns(2)
-        for i, item in enumerate(essentials): cols_ch[i % 2].checkbox(item, key=f"check_{i}")
-    
-    st.divider()
-    if st.button("🎒 Generar Propuesta de Valija", type="primary", use_container_width=True):
-        packable = df[df['Status'] == 'Limpio']
-        forecast = st.session_state.get('travel_weather')
-        if packable.empty: st.error("¡No tenés ropa limpia para viajar!")
-        else:
-            USE_LAUNDRY = False
-            if num_days > 7:
-                USE_LAUNDRY = True; target_days = 6; st.toast("Viaje largo: Ajustando para lavar ropa allá 🧼")
-            else:
-                target_days = num_days; st.toast("Viaje corto: Llevando ropa para todos los días")
-
-            n_tops = target_days + 1
-            n_bots = (target_days // 2) + 1
-            n_out = 2
-
-            pool_tops = packable[packable['Category'].isin(['Remera', 'Camisa'])]
-            pool_bots = packable[packable['Category'] == 'Pantalón']
-            pool_outs = packable[packable['Category'].isin(['Campera', 'Buzo'])]
-
-            avg_max = st.session_state.get('travel_avg_max', 20) 
-
-            if forecast:
-                if avg_max > 25: 
-                    pool_bots = pool_bots[~pool_bots['Code'].apply(lambda x: 'DL' in x or 'JE' in x)]
-                    pool_outs = pool_outs[pool_outs['Code'].apply(lambda x: '04' not in x and '05' not in x)] 
-                elif avg_max < 15: 
-                    pool_bots = pool_bots[~pool_bots['Code'].apply(lambda x: 'SH' in x or 'DC' in x)]
-                    pool_tops = pool_tops[~pool_tops['Code'].apply(lambda x: '00' in x)]
-
-            tops = pool_tops.sample(min(len(pool_tops), n_tops))
-            bots = pool_bots.sample(min(len(pool_bots), n_bots))
-            outs = pool_outs.sample(min(len(pool_outs), n_out))
-            
-            st.session_state['travel_pack'] = pd.concat([tops, bots, outs])
-            st.session_state['travel_laundry_needed'] = USE_LAUNDRY
-            st.session_state['travel_selections'] = {} 
-            st.rerun() 
-
-    if st.session_state.get('travel_pack') is not None:
-        pack = st.session_state['travel_pack']
-        if st.session_state.get('travel_laundry_needed'): st.info("ℹ️ **Modo Lavandería Activo:** Vas por muchos días, así que calculé una valija compacta.")
-
-        st.divider()
-        st.subheader(f"🧳 Tu Valija ({len(pack)} prendas)")
-        cols = st.columns(3)
-        for i, (index, row) in enumerate(pack.iterrows()):
-            with cols[i % 3]:
-                with st.container(border=True):
-                    img = cargar_imagen_desde_url(row['ImageURL'])
-                    if img: st.image(img, use_container_width=True)
-                    else: st.write("📷 Sin foto")
-                    st.caption(f"{row['Category']} ({row['Code']})")
                     c_ida, c_vuelta = st.columns(2)
                     is_ida = c_ida.checkbox("Ida", key=f"ida_{row['Code']}")
                     is_vuelta = c_vuelta.checkbox("Vuel", key=f"vuelta_{row['Code']}")
