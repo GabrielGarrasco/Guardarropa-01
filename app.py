@@ -5,7 +5,7 @@ import os
 import pytz
 import json
 from datetime import datetime, timedelta
-from PIL import Image
+from PIL import Image, ImageOps
 from io import BytesIO
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -13,9 +13,10 @@ import random
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import LabelEncoder
+import calendar
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v17.3", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v18.0", layout="centered", page_icon="🧥")
 
 # ==========================================
 # --- MOTOR DE INTELIGENCIA ARTIFICIAL ---
@@ -145,15 +146,41 @@ def cargar_imagen_desde_url(url):
         if response.status_code == 200: return Image.open(BytesIO(response.content))
     except: return None
 
+# --- NUEVO: EXTRACTOR DE COLOR SIMPLE ---
+def estimar_color_dominante(image):
+    try:
+        # Reducimos a 1 pixel para sacar el promedio
+        img_small = image.resize((1, 1))
+        color = img_small.getpixel((0, 0))
+        # Retornamos Hex
+        return '#{:02x}{:02x}{:02x}'.format(color[0], color[1], color[2])
+    except: return "#000000"
+
 def decodificar_sna(codigo):
     try:
         c = str(codigo).strip()
         if len(c) < 4: return None
         season = c[0]
-        if len(c) > 2 and c[1:3] == 'CS': tipo = 'CS'; idx = 3
-        else: tipo = c[1]; idx = 2
-        attr = c[idx:idx+2]
-        return {"season": season, "tipo": tipo, "attr": attr}
+        # Detectar tipo y offset
+        if len(c) > 2 and c[1:3] == 'CS': 
+            tipo = 'CS' 
+            offset = 3
+        else: 
+            tipo = c[1] 
+            offset = 2
+        
+        attr = c[offset:offset+2]
+        # Intentamos sacar el color si el código sigue el estándar v17
+        # Estructura: Temp(1) + Tipo(1/2) + Attr(2) + Occ(1) + Col(2)
+        color_code = "99" # Default
+        try:
+            occ_idx = offset + 2
+            col_idx = occ_idx + 1
+            if len(c) >= col_idx + 2:
+                color_code = c[col_idx:col_idx+2]
+        except: pass
+        
+        return {"season": season, "tipo": tipo, "attr": attr, "color": color_code}
     except: return None
 
 def get_limit_for_item(category, sna):
@@ -161,6 +188,26 @@ def get_limit_for_item(category, sna):
     if category == 'Pantalón': return LIMITES_USO.get(sna['attr'], 2)
     elif category in ['Remera', 'Camisa']: return LIMITES_USO.get(sna['tipo'], 1)
     return LIMITES_USO.get(sna['tipo'], 3)
+
+# --- NUEVO: MATRIZ DE COLORES ---
+def check_harmony(code_top, code_bot):
+    s_top = decodificar_sna(code_top)
+    s_bot = decodificar_sna(code_bot)
+    if not s_top or not s_bot: return True
+    
+    c_t = s_top.get('color', '99')
+    c_b = s_bot.get('color', '99')
+    
+    # Lista negra de combinaciones (Tops -> Bots prohibidos)
+    forbidden = {
+        '02': ['04', '09'], # Negro no va con Azul(04) o Marron(09) estricto
+        '04': ['02'],       # Azul no va con Negro
+        '06': ['05', '11'], # Rojo no va con Verde o Naranja
+        '09': ['02']        # Marron no va con Negro
+    }
+    
+    if c_b in forbidden.get(c_t, []): return False
+    return True
 
 # --- CLIMA LOCAL ---
 def get_weather_open_meteo():
@@ -201,6 +248,40 @@ def get_weather_emoji(code):
     if code in [45, 48]: return "🌫️"
     if code >= 51: return "☔"
     return "☁️"
+
+# --- NUEVO: CANVAS BUILDER ---
+def create_outfit_canvas(top_code, bot_code, out_code, df_inv):
+    try:
+        imgs = []
+        codes = [c for c in [top_code, bot_code, out_code] if c and c not in ['N/A', 'nan']]
+        
+        for c in codes:
+            row = df_inv[df_inv['Code'] == c]
+            if not row.empty:
+                url = row.iloc[0]['ImageURL']
+                pil_img = cargar_imagen_desde_url(url)
+                if pil_img: imgs.append(pil_img)
+        
+        if not imgs: return None
+
+        # Redimensionar todas al ancho mínimo para consistencia
+        min_width = 300
+        resized_imgs = []
+        for i in imgs:
+            w_percent = (min_width / float(i.size[0]))
+            h_size = int((float(i.size[1]) * float(w_percent)))
+            resized_imgs.append(i.resize((min_width, h_size), Image.Resampling.LANCZOS))
+        
+        total_height = sum([i.size[1] for i in resized_imgs])
+        canvas = Image.new('RGB', (min_width, total_height), (255, 255, 255))
+        
+        y_offset = 0
+        for i in resized_imgs:
+            canvas.paste(i, (0, y_offset))
+            y_offset += i.size[1]
+            
+        return canvas
+    except: return None
 
 # ==========================================
 # --- LÓGICA DE NEGOCIO ---
@@ -250,11 +331,29 @@ def is_needs_wash(row):
         return uses >= limit
     except: return False
 
+def get_thermal_offset(feedback_df):
+    # NUEVO: Calcula offset personalizado
+    if feedback_df.empty: return 3 # Default +3
+    try:
+        # Si el rating de abrigo promedio es bajo (<4), el usuario suele tener frio -> Aumentar offset
+        # Si el rating es alto (>5), el usuario suele tener calor -> Bajar offset
+        avg_abrigo = pd.to_numeric(feedback_df['Rating_Abrigo'], errors='coerce').mean()
+        if pd.isna(avg_abrigo): return 3
+        
+        # Formula inversa simple: 
+        # Si avg es 4 (ideal) -> offset = 3
+        # Si avg es 2 (frio) -> offset = 5
+        # Si avg es 6 (calor) -> offset = 1
+        custom_offset = 3 + (4 - avg_abrigo)
+        return custom_offset
+    except: return 3
+
 def recommend_outfit(df, weather, occasion, seed):
     usable_df = df[df.apply(is_item_usable, axis=1)].copy()
     if usable_df.empty: return pd.DataFrame(), 0, ""
     
     blacklist = set()
+    fb = pd.DataFrame()
     try:
         fb = load_feedback_gsheet()
         if not fb.empty:
@@ -262,12 +361,14 @@ def recommend_outfit(df, weather, occasion, seed):
             fb['Date'] = fb['Date'].astype(str)
             rej = fb[(fb['Date'].str.contains(today, na=False)) & (fb['Action'] == 'Rejected')]
             blacklist = set(rej['Top'].dropna().tolist() + rej['Bottom'].dropna().tolist() + rej['Outer'].dropna().tolist())
-    except: fb = pd.DataFrame()
+    except: pass
     
+    # --- OFFSET TERMICO PERSONALIZADO ---
+    personal_offset = get_thermal_offset(fb)
     t_curr = weather['temp']
     t_max = weather['max']
     t_min = weather['min']
-    t_feel = weather.get('feels_like', t_curr) + 3 
+    t_feel = weather.get('feels_like', t_curr) + personal_offset 
     final = []
     
     coat_msg = ""
@@ -292,19 +393,13 @@ def recommend_outfit(df, weather, occasion, seed):
             coat_msg = "☀️ No hace falta abrigo hoy."
             needs_coat = False
 
-    # --- LÓGICA DE CATEGORÍAS ---
-    # F y U se comparten. El resto son estrictas.
     target_occs = [occasion]
     if occasion in ['F', 'U']:
         target_occs = ['F', 'U'] 
 
-    def get_best(cats, category_type):
+    def get_best(cats, category_type, selected_partner_code=None):
         curr_s = get_current_season()
-        
-        # Filtro: Categoría + Ocasión(es) + Temporada
         pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occs)) & ((usable_df['Season'] == curr_s) | (usable_df['Season'] == 'T'))]
-        
-        # Respaldo: Misma ocasión, pero cualquier temporada
         if pool.empty: pool = usable_df[(usable_df['Category'].isin(cats)) & (usable_df['Occasion'].isin(target_occs))]
         
         if pool.empty: return None
@@ -313,6 +408,12 @@ def recommend_outfit(df, weather, occasion, seed):
         for _, r in pool.iterrows():
             sna = decodificar_sna(r['Code'])
             if not sna: continue
+            
+            # --- FILTRO MATRIX COLOR ---
+            if selected_partner_code:
+                if not check_harmony(r['Code'], selected_partner_code):
+                    continue
+
             match = False
             if category_type == 'bot':
                 attr = sna['attr']
@@ -345,12 +446,20 @@ def recommend_outfit(df, weather, occasion, seed):
             return candidates_df.sort_values('Final_Score', ascending=False).iloc[0]
         except: return candidates_df.sample(1, random_state=seed).iloc[0]
 
-    top = get_best(['Remera', 'Camisa'], 'top'); 
-    if top is not None: final.append(top)
+    # Orden de selección: Primero Bottom (base), luego Top (que combine), luego Outer
     bot = get_best(['Pantalón'], 'bot'); 
-    if bot is not None: final.append(bot)
+    top = None
+    if bot is not None:
+        final.append(bot)
+        top = get_best(['Remera', 'Camisa'], 'top', selected_partner_code=bot['Code'])
+    else:
+        # Si no hay pantalon, busca top independiente
+        top = get_best(['Remera', 'Camisa'], 'top')
+    
+    if top is not None: final.append(top)
+    
     if needs_coat:
-        out = get_best(['Campera', 'Buzo'], 'out')
+        out = get_best(['Campera', 'Buzo'], 'out') # Abrigo suele ser neutro, no chequeo color estricto
         if out is not None: final.append(out)
         
     return pd.DataFrame(final), t_feel, coat_msg
@@ -359,7 +468,7 @@ def recommend_outfit(df, weather, occasion, seed):
 # --- INTERFAZ PRINCIPAL ---
 # ==========================================
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v17.3 - Lite Edition")
+st.sidebar.caption("v18.0 - AI Enhanced")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -473,7 +582,8 @@ with tab1:
         col_w1, col_w2, col_w3 = st.columns(3)
         col_w1.metric("Clima", f"{weather['temp']}°C", weather['desc'])
         col_w2.metric("Sensación", f"{weather['feels_like']}°C", f"Max: {weather['max']}°")
-        col_w3.metric("Perfil", f"{temp_calculada:.1f}°C", "+3°C adj")
+        offset_val = temp_calculada - weather.get('feels_like', weather['temp'])
+        col_w3.metric("Perfil", f"{temp_calculada:.1f}°C", f"{offset_val:+.1f}°C (Smart)")
         if coat_advice: st.markdown(f"**{coat_advice}**")
 
     col_h1, col_h2 = st.columns([2, 2])
@@ -505,35 +615,40 @@ with tab1:
     rec_top, rec_bot, rec_out = None, None, None
     selected_items_codes = []
 
-    def render_card(col, title, df_subset):
-        with col:
-            st.markdown(f"###### {title}")
-            if not df_subset.empty:
-                item = df_subset.iloc[0] 
-                sna = decodificar_sna(item['Code'])
-                limit = get_limit_for_item(item['Category'], sna)
-                uses = int(float(item['Uses'])) if item['Uses'] not in ['', 'nan'] else 0
-                health = max(0.0, min(1.0, (limit - uses) / limit))
-                img_data = cargar_imagen_desde_url(item['ImageURL'])
-                if img_data: st.image(img_data, use_column_width=True)
-                else: st.empty()
-                st.markdown(f"**{item['Category']}**")
-                st.caption(f"Code: `{item['Code']}`")
-                st.progress(health, text=f"Vida: {uses}/{limit}")
-                if 'AI_Score' in item: st.caption(f"🤖 Match: {int(float(item['AI_Score']))}%")
-                if health == 0: st.error("⚠️ AL LIMITE: Lavar") 
-                return item
-            else: st.info("🤷‍♂️ N/A"); return None
-
     if not recs_df.empty:
+        # Extraer códigos
+        t_row = recs_df[recs_df['Category'].isin(['Remera', 'Camisa'])]
+        b_row = recs_df[recs_df['Category'] == 'Pantalón']
+        o_row = recs_df[recs_df['Category'].isin(['Campera', 'Buzo'])]
+        
+        rec_top = t_row.iloc[0]['Code'] if not t_row.empty else "N/A"
+        rec_bot = b_row.iloc[0]['Code'] if not b_row.empty else "N/A"
+        rec_out = o_row.iloc[0]['Code'] if not o_row.empty else "N/A"
+
+        if not t_row.empty: selected_items_codes.append(t_row.iloc[0])
+        if not b_row.empty: selected_items_codes.append(b_row.iloc[0])
+        if not o_row.empty: selected_items_codes.append(o_row.iloc[0])
+
+        # --- CANVAS VISUAL ---
+        st.markdown("###### 📸 Visual Canvas")
+        canvas = create_outfit_canvas(rec_top, rec_bot, rec_out, df)
+        if canvas:
+            st.image(canvas, use_column_width=True)
+        else:
+            st.info("No se pudo generar el canvas visual (faltan fotos).")
+        st.divider()
+
+        # Detalle texto
         c1, c2, c3 = st.columns(3)
-        rec_top_item = render_card(c1, "Torso", recs_df[recs_df['Category'].isin(['Remera', 'Camisa'])])
-        if rec_top_item is not None: rec_top = rec_top_item['Code']; selected_items_codes.append(rec_top_item)
-        rec_bot_item = render_card(c2, "Piernas", recs_df[recs_df['Category'] == 'Pantalón'])
-        if rec_bot_item is not None: rec_bot = rec_bot_item['Code']; selected_items_codes.append(rec_bot_item)
-        rec_out_item = render_card(c3, "Abrigo", recs_df[recs_df['Category'].isin(['Campera', 'Buzo'])])
-        if rec_out_item is not None: rec_out = rec_out_item['Code']; selected_items_codes.append(rec_out_item)
-        else: rec_out = "N/A"
+        with c1: 
+            st.caption("Torso")
+            st.write(f"**{rec_top}**")
+        with c2: 
+            st.caption("Piernas")
+            st.write(f"**{rec_bot}**")
+        with c3: 
+            st.caption("Abrigo")
+            st.write(f"**{rec_out}**")
 
         st.divider()
 
@@ -695,8 +810,19 @@ with tab4:
             else: attr = st.selectbox("Manga", ["00 (Musculosa)", "01 (Corta)", "02 (Larga)"]).split(" ")[0]
         with c2:
             occ = st.selectbox("Ocasión", ["U", "D", "C", "F"])
-            col = st.selectbox("Color", ["01-Blanco", "02-Negro", "03-Gris", "04-Azul", "05-Verde", "06-Rojo", "07-Amarillo", "08-Beige", "09-Marron", "10-Denim", "11-Naranja", "12-Violeta", "99-Estampado"])[:2]
             url = st.text_input("URL Foto")
+            if url and st.button("👁️ Detectar Color"):
+                try:
+                    img = cargar_imagen_desde_url(url)
+                    if img:
+                        hex_col = estimar_color_dominante(img)
+                        st.caption(f"Detectado: {hex_col}")
+                        st.color_picker("Tono Aproximado", hex_col, disabled=True)
+                    else: st.error("Link inválido")
+                except: pass
+            
+            col = st.selectbox("Color", ["01-Blanco", "02-Negro", "03-Gris", "04-Azul", "05-Verde", "06-Rojo", "07-Amarillo", "08-Beige", "09-Marron", "10-Denim", "11-Naranja", "12-Violeta", "99-Estampado"])[:2]
+        
         prefix = f"{temp}{t_code}{attr}{occ}{col}"
         existing_codes = [c for c in df['Code'] if str(c).startswith(prefix)]
         code = f"{prefix}{len(existing_codes) + 1:02d}"
@@ -737,6 +863,35 @@ with tab5:
             dead_df = df[mask]
             if not dead_df.empty: st.dataframe(dead_df[['Category', 'Code']], hide_index=True, use_container_width=True)
             else: st.success("¡Rotación impecable!")
+    
+    st.divider()
+    st.subheader("📅 Calendario de Outfits")
+    try:
+        fb_cal = load_feedback_gsheet()
+        if not fb_cal.empty:
+            fb_cal['DateObj'] = pd.to_datetime(fb_cal['Date']).dt.date
+            now = datetime.now()
+            current_month = now.month
+            current_year = now.year
+            cal = calendar.monthcalendar(current_year, current_month)
+            
+            # Simple Grid Visualization
+            cols_cal = st.columns(7)
+            days = ["L", "M", "Mi", "J", "V", "S", "D"]
+            for i, d in enumerate(days): cols_cal[i].write(f"**{d}**")
+            
+            for week in cal:
+                cols = st.columns(7)
+                for i, day in enumerate(week):
+                    if day == 0:
+                        cols[i].write(" ")
+                    else:
+                        d_str = datetime(current_year, current_month, day).date()
+                        has_outfit = not fb_cal[(fb_cal['DateObj'] == d_str) & (fb_cal['Action'] == 'Accepted')].empty
+                        marker = "🟢" if has_outfit else "⚪"
+                        if d_str == now.date(): marker = "📍"
+                        cols[i].write(f"{day} {marker}")
+    except: st.error("No se pudo cargar el calendario.")
 
 with tab6:
     st.header("✈️ Modo Viaje v3.0 (Smart - Lite)") 
