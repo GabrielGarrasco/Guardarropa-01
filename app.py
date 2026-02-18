@@ -21,6 +21,12 @@ import colorsys
 st.set_page_config(page_title="GDI: Mendoza Ops v21.0", layout="centered", page_icon="🧥")
 
 # ==========================================
+# --- CREDENCIALES TELEGRAM (EDITAR AQUÍ) ---
+# ==========================================
+TELEGRAM_TOKEN = "8562142445:AAF3HNR1WmPRCgCvGAiEbNRmIiVKIQsyZUE"      # <--- PEGA TU TOKEN DENTRO DE LAS COMILLAS
+TELEGRAM_CHAT_ID = "1462139551"  # <--- PEGA TU CHAT ID DENTRO DE LAS COMILLAS
+
+# ==========================================
 # --- MOTOR DE INTELIGENCIA ARTIFICIAL V3.0 (NEURAL STYLE) ---
 # ==========================================
 class OutfitAI:
@@ -424,6 +430,134 @@ def create_outfit_canvas(top_code, bot_code, out_code, df_inv):
     except: return None
 
 # ==========================================
+# --- MODULO TELEGRAM INTEGRADO ---
+# ==========================================
+def enviar_foto_telegram(caption, image):
+    """Envía imagen (canvas) y texto a Telegram usando requests y BytesIO."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or TELEGRAM_TOKEN == "TU_TOKEN_AQUI":
+        return False, "⚠️ Faltan credenciales de Telegram en el código."
+    
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        
+        # Convertir PIL Image a BytesIO
+        bio = BytesIO()
+        image.save(bio, format='PNG')
+        bio.seek(0)
+        
+        files = {'photo': bio}
+        data = {'chat_id': TELEGRAM_CHAT_ID, 'caption': caption, 'parse_mode': 'Markdown'}
+        
+        resp = requests.post(url, files=files, data=data)
+        
+        if resp.status_code == 200:
+            return True, "Mensaje enviado con éxito"
+        else:
+            return False, f"Error Telegram: {resp.text}"
+    except Exception as e:
+        return False, f"Error de conexión: {str(e)}"
+
+def enviar_briefing_diario():
+    """Genera el reporte completo y lo envía."""
+    try:
+        # 1. Obtener Clima Base
+        w_data = get_weather_open_meteo()
+        
+        # 2. Obtener Probabilidad de Lluvia (Consulta Adicional)
+        rain_warning = ""
+        try:
+            url_rain = "https://api.open-meteo.com/v1/forecast?latitude=-32.8908&longitude=-68.8272&hourly=precipitation_probability&timezone=auto&forecast_days=1"
+            res_rain = requests.get(url_rain).json()
+            probs = res_rain['hourly']['precipitation_probability']
+            times = res_rain['hourly']['time']
+            
+            now_hour = datetime.now().hour
+            rain_hits = []
+            
+            # Revisar las próximas 12 horas
+            for i in range(now_hour, min(now_hour + 12, len(probs))):
+                if probs[i] > 30:
+                    rain_hits.append(f"{datetime.fromisoformat(times[i]).strftime('%H:%M')} ({probs[i]}%)")
+            
+            if rain_hits:
+                rain_warning = f"\n☔ *ALERTA LLUVIA:* Probabilidad alta a las: {', '.join(rain_hits)}"
+            else:
+                rain_warning = "\n✅ Sin lluvias próximas."
+        except:
+            rain_warning = "\n⚠️ No se pudo verificar lluvias."
+
+        # 3. Gestión de Abrigo (Lógica horaria estricta < 18°C)
+        coat_schedule = ""
+        hourly_temps = w_data.get('hourly_temp', [])
+        hourly_times = w_data.get('hourly_time', [])
+        
+        cold_hours = []
+        now = datetime.now()
+        for t, time_str in zip(hourly_temps, hourly_times):
+            dt = datetime.fromisoformat(time_str)
+            if dt.day == now.day and dt.hour >= now.hour: # Solo horas futuras de hoy
+                if t < 18:
+                    cold_hours.append(dt.hour)
+        
+        if cold_hours:
+            start = min(cold_hours)
+            end = max(cold_hours)
+            if len(cold_hours) == (end - start + 1):
+                coat_schedule = f"\n🧥 *ABRIGO:* Obligatorio de {start}:00 a {end}:00 hs (<18°C)."
+            else:
+                coat_schedule = f"\n🧥 *ABRIGO:* Necesario en bloques entre {start}:00 y {end}:00 hs."
+        else:
+            coat_schedule = "\n👕 Clima agradable, abrigo ligero o nulo."
+
+        # 4. Gestión de Lavandería
+        laundry_msg = ""
+        if 'inventory' in st.session_state:
+            inv = st.session_state['inventory']
+            dirty_count = len(inv[inv['Status'] == 'Sucio'])
+            clean_shirts = len(inv[(inv['Category'].isin(['Remera', 'Camisa'])) & (inv['Status'] == 'Limpio')])
+            
+            if dirty_count > 5:
+                laundry_msg += f"\n🧺 *LAVANDERÍA:* Acumulaste {dirty_count} prendas sucias."
+            if clean_shirts < 3:
+                laundry_msg += f"\n⚠️ *URGENTE:* Quedan solo {clean_shirts} remeras limpias."
+
+        # 5. Generar Canvas del Outfit (Simulamos una recomendación fresca si no hay una fija)
+        occ_brief = st.session_state.get('last_occ_viewed', 'U') 
+        df_inv = st.session_state.get('inventory', pd.DataFrame())
+        
+        recs, _, _ = recommend_outfit(df_inv, w_data, occ_brief, random.randint(1, 1000))
+        
+        if recs.empty:
+            return False, "No se pudo generar recomendación (falta ropa)."
+
+        r_top = recs[recs['Category'].isin(['Remera', 'Camisa'])].iloc[0]['Code'] if not recs[recs['Category'].isin(['Remera', 'Camisa'])].empty else None
+        r_bot = recs[recs['Category'] == 'Pantalón'].iloc[0]['Code'] if not recs[recs['Category'] == 'Pantalón'].empty else None
+        r_out = recs[recs['Category'].isin(['Campera', 'Buzo'])].iloc[0]['Code'] if not recs[recs['Category'].isin(['Campera', 'Buzo'])].empty else None
+        
+        canvas = create_outfit_canvas(r_top, r_bot, r_out, df_inv)
+        if not canvas:
+            return False, "No se pudo generar el canvas visual."
+
+        # 6. Construir Mensaje Final
+        mensaje = (
+            f"🚀 *GDI MENDOZA OPS - BRIEFING DIARIO*\n"
+            f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
+            f"🌡️ *Clima Actual:* {w_data['temp']}°C (ST {w_data['feels_like']}°C)\n"
+            f"📝 {w_data['desc']}\n"
+            f"{rain_warning}"
+            f"{coat_schedule}"
+            f"\n\n👔 *Outfit Sugerido ({occ_brief}):*"
+            f"\n• Top: {r_top}\n• Bot: {r_bot}\n• Out: {r_out}"
+            f"{laundry_msg}"
+        )
+
+        ok, status = enviar_foto_telegram(mensaje, canvas)
+        return ok, status
+
+    except Exception as e:
+        return False, f"Error interno briefing: {str(e)}"
+
+# ==========================================
 # --- LÓGICA DE NEGOCIO (PHYSICS & ROTATION) ---
 # ==========================================
 
@@ -651,7 +785,7 @@ def recommend_outfit(df, weather, occasion, seed):
                 # MODO NORMAL (Harmonía Cromática)
                 candidates_df['Color_Harmony'] = 0
                 if selected_partner_code:
-                     candidates_df['Color_Harmony'] = candidates_df.apply(
+                      candidates_df['Color_Harmony'] = candidates_df.apply(
                         lambda x: 15 if check_harmony(x['Code'], selected_partner_code) else -15, 
                         axis=1
                     )
@@ -681,7 +815,7 @@ def recommend_outfit(df, weather, occasion, seed):
 # --- INTERFAZ PRINCIPAL ---
 # ==========================================
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v21.0 - Deep Learning")
+st.sidebar.caption("v21.1 - Telegram Ops")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -811,6 +945,16 @@ with tab1:
         offset_val = temp_calculada - weather.get('feels_like', weather['temp'])
         col_w3.metric("Perfil", f"{temp_calculada:.1f}°C", f"{offset_val:+.1f}°C (Smart)")
         if coat_advice: st.markdown(f"**{coat_advice}**")
+        
+        # --- BOTÓN TELEGRAM ---
+        st.divider()
+        if st.button("🚀 Enviar a Telegram", use_container_width=True):
+            with st.spinner("Conectando con GDI HQ..."):
+                ok, msg = enviar_briefing_diario()
+                if ok:
+                    st.success(f"Enviado: {msg}")
+                else:
+                    st.error(f"Error: {msg}")
 
     col_h1, col_h2 = st.columns([2, 2])
     with col_h1: st.subheader("Tu Outfit (AI)")
