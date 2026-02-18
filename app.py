@@ -14,10 +14,10 @@ import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import LabelEncoder
 import calendar
-import altair as alt # Necesario para los nuevos gráficos
+import altair as alt
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v19.0", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v20.0", layout="centered", page_icon="🧥")
 
 # ==========================================
 # --- MOTOR DE INTELIGENCIA ARTIFICIAL ---
@@ -40,6 +40,7 @@ class OutfitAI:
                 for part in ['Top', 'Bottom', 'Outer']:
                     code = row[part]
                     if code and code not in ['N/A', 'nan', 'None', '']:
+                        # Buscar en inventario (incluso si está archivado para entrenar)
                         cat_matches = inventory_df[inventory_df['Code'] == code]['Category'].values
                         cat_val = cat_matches[0] if len(cat_matches) > 0 else 'Unknown'
                         code_num = int(''.join(filter(str.isdigit, str(code)))) if any(c.isdigit() for c in str(code)) else 0
@@ -128,6 +129,28 @@ def save_feedback_entry_gsheet(entry):
 
 # --- CONSTANTES ---
 LIMITES_USO = {"R": 2, "Sh": 2, "DC": 2, "Je": 4, "B": 4, "CS": 1, "Ve": 2, "DL": 2, "C": 5}
+
+# --- MAPA DE COLORES PARA GRAFICOS ---
+COLOR_MAP = {
+    "01": "#F5F5F5", # Blanco
+    "02": "#1A1A1A", # Negro
+    "03": "#808080", # Gris
+    "04": "#0000CD", # Azul
+    "05": "#228B22", # Verde
+    "06": "#B22222", # Rojo
+    "07": "#FFD700", # Amarillo
+    "08": "#F5F5DC", # Beige
+    "09": "#8B4513", # Marron
+    "10": "#4682B4", # Denim
+    "11": "#FF8C00", # Naranja
+    "12": "#8A2BE2", # Violeta
+    "99": "#FF69B4"  # Estampado/Otro
+}
+COLOR_NAMES = {
+    "01": "Blanco", "02": "Negro", "03": "Gris", "04": "Azul", "05": "Verde",
+    "06": "Rojo", "07": "Amarillo", "08": "Beige", "09": "Marron", "10": "Denim",
+    "11": "Naranja", "12": "Violeta", "99": "Estampado"
+}
 
 def get_mendoza_time():
     try: return datetime.now(pytz.timezone('America/Argentina/Mendoza'))
@@ -302,6 +325,8 @@ def calculate_smart_score(item_row, current_temp, occasion, feedback_df):
     return gusto_score
 
 def is_item_usable(row):
+    # Filtrar también los archivados para que no salgan en recomendaciones
+    if 'Archived' in str(row['Status']): return False
     if row['Status'] != 'Limpio': return False
     sna = decodificar_sna(row['Code'])
     if not sna: return True
@@ -313,6 +338,8 @@ def is_item_usable(row):
     return True
 
 def is_needs_wash(row):
+    # Archivados no se lavan
+    if 'Archived' in str(row['Status']): return False
     if row['Status'] in ['Sucio', 'Lavando']: return True
     sna = decodificar_sna(row['Code'])
     if not sna: return False
@@ -346,14 +373,11 @@ def recommend_outfit(df, weather, occasion, seed):
             blacklist = set(rej['Top'].dropna().tolist() + rej['Bottom'].dropna().tolist() + rej['Outer'].dropna().tolist())
     except: pass
     
-    # --- AGENDA BLOCKER (Nuevo) ---
     if 'agenda_reserves' in st.session_state:
         today_date = get_mendoza_time().date()
         for res_date, codes in st.session_state['agenda_reserves'].items():
-            # Si hay una reserva FUTURA, bloqueamos esos items hoy para que no se usen/ensucien
             if res_date > today_date:
                 blacklist.update(codes)
-            # Si la reserva es HOY, forzamos la sugerencia (esto se maneja en UI, aqui solo evitamos conflictos)
 
     personal_offset = get_thermal_offset(fb)
     t_curr = weather['temp']
@@ -456,7 +480,7 @@ def recommend_outfit(df, weather, occasion, seed):
 # --- INTERFAZ PRINCIPAL ---
 # ==========================================
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v19.0 - AI Full Suite")
+st.sidebar.caption("v20.0 - Marie Kondo")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
@@ -745,17 +769,14 @@ with tab1:
 with tab2: 
     st.header("Lavadero")
     
-    # --- SMART LAUNDRY ---
     with st.expander("🧠 Smart Laundry (Sugerencia IA)", expanded=True):
         if not df.empty:
-            # 1. Identificar sucio y limpio
             dirty_pool = df[df['Status'].isin(['Sucio', 'Lavando'])]
             clean_pool = df[df['Status'] == 'Limpio']
             
             if dirty_pool.empty:
                 st.success("¡Nada que lavar!")
             else:
-                # 2. Calcular Escasez por Categoría
                 total_counts = df['Category'].value_counts()
                 clean_counts = clean_pool['Category'].value_counts()
                 
@@ -763,22 +784,13 @@ with tab2:
                 for _, row in dirty_pool.iterrows():
                     cat = row['Category']
                     code = row['Code']
-                    # Escasez Score (0 a 10): Si tengo pocas limpias de esta categoria, score alto
                     total_c = total_counts.get(cat, 1)
                     clean_c = clean_counts.get(cat, 0)
-                    scarcity_ratio = 1 - (clean_c / total_c) # 1 si no hay limpias
+                    scarcity_ratio = 1 - (clean_c / total_c)
                     scarcity_score = scarcity_ratio * 10
-                    
-                    # Favorito Score (0 a 5): Basado en AI feedback si existe, sino random pequeño
-                    fav_score = 0
-                    if 'fb_side' in locals() and not fb_side.empty:
-                         # Buscar rating promedio de este item
-                         pass # Simplificacion: Usamos random para demo si no hay data suficiente
-                    
-                    final_wash_score = scarcity_score + fav_score + random.uniform(0, 2)
+                    final_wash_score = scarcity_score + random.uniform(0, 2)
                     recommendations.append({'Code': code, 'Category': cat, 'Score': final_wash_score})
                 
-                # Top 5 a lavar
                 recs_wash_df = pd.DataFrame(recommendations).sort_values('Score', ascending=False).head(5)
                 st.info("💡 La IA sugiere lavar esto prioritariamente (por escasez de limpias):")
                 for _, r in recs_wash_df.iterrows():
@@ -816,7 +828,6 @@ with tab2:
 with tab3: 
     st.header("Inventario Total")
     
-    # --- JUEGO: SI LA PERDIERA ---
     with st.expander("🎲 Juego: ¿Si la perdiera?"):
         st.caption("La IA elige una prenda al azar. Si la perdieras hoy, ¿la comprarías de nuevo?")
         if st.button("🔄 Jugar"):
@@ -844,8 +855,48 @@ with tab3:
                     st.error(f"Considera donar: {item['Code']}")
                     del st.session_state['lost_game_item']; st.rerun()
     
-    edited_inv = st.data_editor(df, num_rows="dynamic", use_container_width=True, column_config={"Uses": st.column_config.ProgressColumn("Desgaste", min_value=0, max_value=10, format="%d"), "ImageURL": st.column_config.LinkColumn("Foto")})
-    if st.button("💾 Guardar Inventario Completo"): st.session_state['inventory'] = edited_inv; save_data_gsheet(edited_inv); st.toast("Guardado")
+    # Filtramos archivadas para la vista principal
+    active_inv = df[~df['Status'].str.contains('Archived', na=False)]
+    edited_inv = st.data_editor(active_inv, num_rows="dynamic", use_container_width=True, column_config={"Uses": st.column_config.ProgressColumn("Desgaste", min_value=0, max_value=10, format="%d"), "ImageURL": st.column_config.LinkColumn("Foto")})
+    if st.button("💾 Guardar Inventario Completo"): 
+        # Actualizamos solo las filas activas en el DF original
+        df.update(edited_inv)
+        st.session_state['inventory'] = df; save_data_gsheet(df); st.toast("Guardado")
+
+    st.divider()
+    st.subheader("🧹 Gestión Manual y Limpieza")
+    st.info("Ingresa un código para modificar sus usos o Archivarlo (sacarlo de circulación).")
+    
+    with st.container(border=True):
+        col_m_in, col_m_act = st.columns([1, 2])
+        with col_m_in:
+            manual_code = st.text_input("Código de Prenda")
+        with col_m_act:
+            c_act1, c_act2, c_act3 = st.columns(3)
+            if manual_code:
+                clean_m_code = manual_code.strip()
+                if clean_m_code in df['Code'].values:
+                    idx = df[df['Code'] == clean_m_code].index[0]
+                    curr_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
+                    
+                    with c_act1:
+                        if st.button("➕ Sumar Uso"):
+                            df.at[idx, 'Uses'] = curr_uses + 1; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
+                            st.session_state['inventory'] = df; save_data_gsheet(df); st.toast(f"📈 Usos: {curr_uses + 1}"); st.rerun()
+                    with c_act2:
+                        if st.button("➖ Restar Uso"):
+                            df.at[idx, 'Uses'] = max(0, curr_uses - 1)
+                            st.session_state['inventory'] = df; save_data_gsheet(df); st.toast(f"📉 Usos: {max(0, curr_uses - 1)}"); st.rerun()
+                    
+                    st.divider()
+                    st.caption("Zona de Archivo (Desaparece del armario)")
+                    reason = st.selectbox("Motivo de baja", ["Rota ✂️", "Vieja 👴", "No me gusta 👎", "Donada 🎁"])
+                    if st.button(f"🗑️ Archivar como {reason}"):
+                        tag = reason.split(" ")[0]
+                        df.at[idx, 'Status'] = f"Archived_{tag}"
+                        st.session_state['inventory'] = df; save_data_gsheet(df); st.success(f"Adiós {clean_m_code}! Archivada como {tag}"); st.rerun()
+                else:
+                    st.error("Código no encontrado.")
 
 with tab4: 
     st.header("Alta de Prenda")
@@ -886,7 +937,6 @@ with tab5:
     if not df.empty:
         df['Uses'] = pd.to_numeric(df['Uses'], errors='coerce').fillna(0)
         
-        # 1. Principio de Pareto (80/20)
         st.subheader("1. Principio de Pareto")
         total_uses = df['Uses'].sum()
         if total_uses > 0:
@@ -900,14 +950,26 @@ with tab5:
             st.progress(min(1.0, perc_items/100))
         else: st.info("Falta data de uso.")
 
-        # 2. Rueda de Colores
         st.subheader("2. Rueda de Colores")
         df['Color_Code'] = df['Code'].apply(lambda x: decodificar_sna(x)['color'] if decodificar_sna(x) else 'Unknown')
-        color_counts = df['Color_Code'].value_counts().reset_index()
-        color_counts.columns = ['Color', 'Count']
-        st.bar_chart(color_counts.set_index('Color'))
         
-        # 3. MVP vs Suplentes
+        color_data = df['Color_Code'].value_counts().reset_index()
+        color_data.columns = ['ColorCode', 'Count']
+        
+        # Mapear códigos a Nombres y Hex
+        color_data['ColorName'] = color_data['ColorCode'].map(COLOR_NAMES).fillna('Otro')
+        color_data['Hex'] = color_data['ColorCode'].map(COLOR_MAP).fillna('#808080')
+        
+        # Gráfico Altair con colores reales
+        chart = alt.Chart(color_data).mark_bar().encode(
+            x=alt.X('ColorName', sort='-y'),
+            y='Count',
+            color=alt.Color('ColorName', scale=alt.Scale(domain=list(color_data['ColorName']), range=list(color_data['Hex'])), legend=None),
+            tooltip=['ColorName', 'Count']
+        ).interactive()
+        
+        st.altair_chart(chart, use_container_width=True)
+        
         st.subheader("3. MVP vs Suplentes")
         c_mvp1, c_mvp2 = st.columns(2)
         with c_mvp1:
@@ -918,7 +980,6 @@ with tab5:
             suplentes = df[(df['Uses'] == 0) & (df['Status'] == 'Limpio')]
             st.dataframe(suplentes.head(3)[['Code', 'Category']], hide_index=True)
 
-        # 4. Tendencia Flow/Comfort
         st.subheader("4. Tendencia Flow vs Comfort")
         try:
             fb_trend = load_feedback_gsheet()
