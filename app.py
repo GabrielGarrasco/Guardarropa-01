@@ -15,12 +15,13 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import LabelEncoder
 import calendar
 import altair as alt
+import colorsys
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="GDI: Mendoza Ops v21.0", layout="centered", page_icon="🧥")
 
 # ==========================================
-# --- MOTOR DE INTELIGENCIA ARTIFICIAL V2.0 (ENHANCED) ---
+# --- MOTOR DE INTELIGENCIA ARTIFICIAL V3.0 (NEURAL STYLE) ---
 # ==========================================
 class OutfitAI:
     def __init__(self):
@@ -29,19 +30,31 @@ class OutfitAI:
         self.is_trained = False
         self.co_occurrence_matrix = {} # Memoria de pares exitosos
 
-    def _extract_features(self, temp, occasion, code):
-        """Desglosa el código SNA en features individuales para la IA"""
+    def _extract_features(self, temp, occasion, code, wind=0, humidity=50, date_obj=None):
+        """Desglosa el código SNA en features individuales para la IA (Contexto expandido)"""
         sna = decodificar_sna(code)
+        
+        # Calcular día de la semana (0=Lunes, 6=Domingo)
+        weekday = 0
+        if date_obj:
+            try: weekday = date_obj.weekday()
+            except: pass
+        else:
+            weekday = datetime.now().weekday()
+
         if not sna:
             # Fallback si el código no es estándar
-            return {'Temp': temp, 'Occasion': occasion, 'Season': 'X', 'Attr': '00', 'Color': '99'}
+            return {'Temp': temp, 'Occasion': occasion, 'Season': 'X', 'Attr': '00', 'Color': '99', 'Wind': wind, 'Hum': humidity, 'Day': weekday}
         
         return {
             'Temp': float(temp),
             'Occasion': str(occasion),
             'Season': sna['season'],   # Ej: W, V
             'Attr': sna['attr'],       # Ej: Je, 04, Sh
-            'Color': sna['color']      # Ej: 02, 10
+            'Color': sna['color'],     # Ej: 02, 10
+            'Wind': float(wind),       # Nuevo: Viento
+            'Hum': float(humidity),    # Nuevo: Humedad
+            'Day': int(weekday)        # Nuevo: Día de la semana
         }
 
     def train(self, feedback_df, inventory_df):
@@ -88,7 +101,13 @@ class OutfitAI:
                 for part in ['Top', 'Bottom', 'Outer']:
                     code = row[part]
                     if code and code not in ['N/A', 'nan', 'None', '']:
-                        features = self._extract_features(row['Temp_Real'], row['Occasion'], code)
+                        # Extraemos features con defaults si no existen las columnas nuevas en el histórico viejo
+                        w = row.get('Wind', 0)
+                        h = row.get('Humidity', 50)
+                        try: d_obj = datetime.strptime(str(row['Date']), "%Y-%m-%d %H:%M")
+                        except: d_obj = None
+                        
+                        features = self._extract_features(row['Temp_Real'], row['Occasion'], code, w, h, d_obj)
                         features['Score'] = row['Target_Score']
                         training_rows.append(features)
             
@@ -97,7 +116,7 @@ class OutfitAI:
 
             # Encoding de variables categóricas
             cat_cols = ['Occasion', 'Season', 'Attr', 'Color']
-            X = df_train[['Temp'] + cat_cols].copy()
+            X = df_train[['Temp', 'Wind', 'Hum', 'Day'] + cat_cols].copy()
             y = df_train['Score']
 
             for col in cat_cols:
@@ -116,14 +135,14 @@ class OutfitAI:
             # print(f"Error training: {e}") # Debug off
             return False
 
-    def predict_score(self, item_row, current_temp, occasion_code, partner_code=None):
+    def predict_score(self, item_row, current_temp, occasion_code, partner_code=None, wind=0, humidity=50):
         if not self.is_trained: return 50.0 
         try:
             # 1. Predicción Base (ML)
-            features = self._extract_features(current_temp, occasion_code, item_row['Code'])
+            features = self._extract_features(current_temp, occasion_code, item_row['Code'], wind, humidity)
             
             # Vector de entrada para el modelo
-            input_vector = [features['Temp']]
+            input_vector = [features['Temp'], features['Wind'], features['Hum'], features['Day']]
             for col in ['Occasion', 'Season', 'Attr', 'Color']:
                 val = features[col]
                 # Manejo de valores nuevos no vistos en entrenamiento
@@ -131,7 +150,7 @@ class OutfitAI:
                     if val not in self.encoders[col].classes_: val = 'Unknown'
                     input_vector.append(self.encoders[col].transform([val])[0])
                 else:
-                     input_vector.append(0) # Fallback
+                      input_vector.append(0) # Fallback
             
             input_np = np.array([input_vector])
             predicted_score = self.model.predict(input_np)[0]
@@ -284,23 +303,41 @@ def get_limit_for_item(category, sna):
     elif category in ['Remera', 'Camisa']: return LIMITES_USO.get(sna['tipo'], 1)
     return LIMITES_USO.get(sna['tipo'], 3)
 
+# --- NUEVO SISTEMA DE ARMONÍA CROMÁTICA (MATH BASED) ---
+def hex_to_rgb(hex_color):
+    hex_color = hex_color.lstrip('#')
+    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+def calcular_armonia_color(hex1, hex2):
+    r1, g1, b1 = hex_to_rgb(hex1)
+    r2, g2, b2 = hex_to_rgb(hex2)
+    h1, s1, v1 = colorsys.rgb_to_hsv(r1/255, g1/255, b1/255)
+    h2, s2, v2 = colorsys.rgb_to_hsv(r2/255, g2/255, b2/255)
+    
+    diff_h = abs(h1 - h2) * 360
+    if diff_h > 180: diff_h = 360 - diff_h
+    
+    # Monocromático, Análogo, Complementario, Triada
+    if diff_h < 15: return 1.2
+    if 15 <= diff_h <= 45: return 1.1 
+    if 160 <= diff_h <= 200: return 1.3 
+    if 110 <= diff_h <= 130: return 1.1
+    if v1 < 0.2 and v2 < 0.2: return 0.8 # Evitar dos oscuros sucios
+    return 1.0
+
 def check_harmony(code_top, code_bot):
     s_top = decodificar_sna(code_top)
     s_bot = decodificar_sna(code_bot)
     if not s_top or not s_bot: return True
     
-    c_t = s_top.get('color', '99')
-    c_b = s_bot.get('color', '99')
+    hex_t = COLOR_MAP.get(s_top.get('color', '99'), "#000000")
+    hex_b = COLOR_MAP.get(s_bot.get('color', '99'), "#000000")
     
-    forbidden = {
-        '02': ['04', '09'], 
-        '04': ['02'],       
-        '06': ['05', '11'], 
-        '09': ['02']        
-    }
-    
-    if c_b in forbidden.get(c_t, []): return False
-    return True
+    neutros = ['01', '02', '03', '99']
+    if s_top.get('color') in neutros or s_bot.get('color') in neutros: return True
+        
+    factor = calcular_armonia_color(hex_t, hex_b)
+    return factor >= 0.9
 
 # --- CLIMA LOCAL (Con Viento y Humedad) ---
 def get_weather_open_meteo():
@@ -327,9 +364,10 @@ def get_weather_open_meteo():
             "hourly_temp": hourly.get('temperature_2m', []), 
             "hourly_time": hourly.get('time', []),
             "wind": current.get('wind_speed_10m', 0),
-            "humidity": current.get('relative_humidity_2m', 50)
+            "humidity": current.get('relative_humidity_2m', 50),
+            "weather_code": code
         }
-    except: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error Conexión", "hourly_temp": [], "hourly_time": [], "wind": 0, "humidity": 50}
+    except: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error Conexión", "hourly_temp": [], "hourly_time": [], "wind": 0, "humidity": 50, "weather_code": 0}
 
 # --- FUNCIONES VIAJE ---
 def get_city_coords(city_name):
@@ -386,66 +424,66 @@ def create_outfit_canvas(top_code, bot_code, out_code, df_inv):
     except: return None
 
 # ==========================================
-# --- LÓGICA DE NEGOCIO (UPDATED) ---
+# --- LÓGICA DE NEGOCIO (PHYSICS & ROTATION) ---
 # ==========================================
 
 def calculate_smart_score(item_row, current_temp, occasion, feedback_df, weather_data=None, partner_code=None):
-    # 1. Base Score AI (Gustos + Co-ocurrencia)
+    # --- 1. BASE: Predicción ML o Promedio Histórico ---
     ai = st.session_state.get('outfit_ai')
-    gusto_score = 50.0
+    score = 50.0
+    wind = weather_data.get('wind', 0) if weather_data else 0
+    hum = weather_data.get('humidity', 50) if weather_data else 50
     
-    if ai and not ai.is_trained and not feedback_df.empty:
-        inv_ref = st.session_state.get('inventory', pd.DataFrame())
-        ai.train(feedback_df, inv_ref)
-    
-    if ai and ai.is_trained: 
-        # MODIFICADO: Pasamos el partner_code a la AI
-        gusto_score = ai.predict_score(item_row, current_temp, occasion, partner_code)
+    if ai and ai.is_trained:
+        # Pasamos contexto expandido
+        score = ai.predict_score(item_row, current_temp, occasion, partner_code, wind, hum)
     else:
-        # Fallback si no hay AI entrenada
+        # Fallback histórico
         item_code = item_row['Code']
         if not feedback_df.empty:
-            cols_to_check = [c for c in ['Top', 'Bottom', 'Outer'] if c in feedback_df.columns]
-            mask = pd.Series(False, index=feedback_df.index)
-            for col in cols_to_check: mask |= (feedback_df[col] == item_code)
-            history = feedback_df[mask]
-            if not history.empty:
-                try:
-                    s_val = pd.to_numeric(history['Rating_Seguridad'], errors='coerce').mean()
-                    c_val = pd.to_numeric(history['Rating_Comodidad'], errors='coerce').mean()
-                    avg_rating = (s_val + c_val) / 2
-                    gusto_score = (avg_rating / 5) * 100
+            hist = feedback_df[feedback_df['Top'] == item_code] # Simplificado para velocidad
+            if not hist.empty:
+                try: score = (pd.to_numeric(hist['Rating_Seguridad'], errors='coerce').mean() / 5) * 100
                 except: pass
 
-    # --- LÓGICA COOLDOWN (ROTACIÓN) ---
+    # --- 2. FACTOR "ROTACIÓN" (Para no repetir) ---
     try:
         if item_row['LastWorn'] not in ['', 'nan', 'None']:
             last_date = datetime.strptime(str(item_row['LastWorn']), "%Y-%m-%d").date()
             today = get_mendoza_time().date()
             days_diff = (today - last_date).days
             
-            # Penalización fuerte si se usó hace menos de 4 días
-            if days_diff <= 1: gusto_score -= 30 # Ayer
-            elif days_diff <= 3: gusto_score -= 15 # Hace poco
+            if days_diff <= 2: score -= 40 # ¡No repetir lo de anteayer!
+            elif days_diff <= 5: score -= 15 # Dale un descanso
+            else: score += (days_diff * 0.5) # Bonus por "extrañar" la prenda
     except: pass
 
-    # --- LÓGICA DE VIENTO Y ZONDA ---
+    # --- 3. FÍSICA AVANZADA (Termodinámica y Viento) ---
     if weather_data:
-        wind = weather_data.get('wind', 0)
+        is_sunny = weather_data.get('weather_code', 0) <= 3 
         sna = decodificar_sna(item_row['Code'])
         
         if sna:
-            # Si hay viento fuerte (> 25 km/h)
-            if wind > 25:
-                # Premiar Rompevientos (Outer con attr '01')
-                if item_row['Category'] in ['Campera', 'Buzo'] and sna['attr'] == '01':
-                    gusto_score += 20
+            color_code = sna.get('color', '99')
+            attr = sna.get('attr', '00')
+            
+            # A. LEY DE ABSORCIÓN SOLAR
+            is_dark = color_code in ['02', '04', '09', '12']
+            if is_sunny:
+                if current_temp < 18 and is_dark: score += 10 # Sol + Negro en invierno = Bien
+                elif current_temp > 28 and is_dark: score -= 15 # Sol + Negro en verano = Mal
+                elif current_temp > 28 and not is_dark: score += 10 # Ropa clara en verano
+
+            # B. RESISTENCIA EÓLICA (Zonda)
+            if wind > 20: 
+                if item_row['Category'] in ['Campera', 'Buzo']:
+                    if attr == '01': score += 20 # Rompevientos
+                    elif attr in ['03', '04']: score -= 10 # Lana pasa viento
                 
-                # Penalizar prendas cortas o muy abiertas si hace frío
-                if current_temp < 20 and item_row['Category'] == 'Pantalón' and sna['attr'] in ['Sh', 'DC']:
-                    gusto_score -= 15
-    
-    return gusto_score
+                if item_row['Category'] == 'Pantalón' and attr in ['Sh', 'DC']:
+                    score -= 20 # Piernas frías
+
+    return score
 
 def is_item_usable(row):
     # Filtrar también los archivados para que no salgan en recomendaciones
@@ -496,6 +534,10 @@ def recommend_outfit(df, weather, occasion, seed):
             blacklist = set(rej['Top'].dropna().tolist() + rej['Bottom'].dropna().tolist() + rej['Outer'].dropna().tolist())
     except: pass
     
+    # Agregar Blacklist Temporal de sesión
+    if 'temp_blacklist' in st.session_state:
+        blacklist.update(st.session_state['temp_blacklist'])
+
     if 'agenda_reserves' in st.session_state:
         today_date = get_mendoza_time().date()
         for res_date, codes in st.session_state['agenda_reserves'].items():
@@ -558,8 +600,10 @@ def recommend_outfit(df, weather, occasion, seed):
             if not sna: continue
             
             if selected_partner_code:
+                # Usamos la nueva función check_harmony que devuelve score, aqui lo simplificamos a bool
                 if not check_harmony(r['Code'], selected_partner_code):
-                    continue
+                    pass # En el nuevo modelo no filtramos rígido, dejamos pasar para que el score decida, salvo extremos.
+                         # Pero mantendremos el filtro para optimizar si es MUY malo.
 
             match = False
             if category_type == 'bot':
@@ -589,27 +633,22 @@ def recommend_outfit(df, weather, occasion, seed):
         try:
             candidates_df = candidates_df.copy()
             
-            # 1. Calculamos el Score Base de la IA (Gustos + Clima)
+            # 1. Calculamos el Score Base de la IA (Gustos + Clima + Física)
             candidates_df['AI_Score'] = candidates_df.apply(
                 lambda x: calculate_smart_score(x, t_curr, occasion, fb, weather, selected_partner_code), 
                 axis=1
             )
 
-            # --- NUEVA LÓGICA: CURIOSIDAD (EXPLORACIÓN VS EXPLOTACIÓN) ---
-            # Generamos un número al azar. Si es menor a 0.1 (10%), la IA se pone "curiosa".
+            # --- ESTRATEGIA: CURIOSIDAD (EXPLORACIÓN VS EXPLOTACIÓN) ---
+            # 10% de las veces, la IA ignora la perfección y busca que uses ropa olvidada.
             exploration_mode = random.random() < 0.1 
 
             if exploration_mode:
-                # MODO CURIOSIDAD:
-                # Ignora un poco si combina perfecto, y prioriza prendas que tienes OLVIDADAS (Poco uso).
-                # (10 - Uses) significa: si tiene 0 usos, suma 50 puntos. Si tiene 10 usos, suma 0.
+                # MODO CURIOSIDAD
                 candidates_df['Exploration_Boost'] = (10 - pd.to_numeric(candidates_df['Uses'], errors='coerce').fillna(0).clip(upper=10)) * 5
                 candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df['Exploration_Boost']
-                # Opcional: Avisar en consola o toast
-                # print("Modo Exploración activo") 
             else:
-                # MODO NORMAL (LO MEJOR):
-                # Sumamos puntos si los colores combinan bien (Armonía)
+                # MODO NORMAL (Harmonía Cromática)
                 candidates_df['Color_Harmony'] = 0
                 if selected_partner_code:
                      candidates_df['Color_Harmony'] = candidates_df.apply(
@@ -617,13 +656,10 @@ def recommend_outfit(df, weather, occasion, seed):
                         axis=1
                     )
                 
-                # Score Final = IA + Armonía + Pequeña variación para que no sea robótico
                 candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df['Color_Harmony'] + candidates_df.apply(lambda x: random.uniform(-1, 1), axis=1)
 
             return candidates_df.sort_values('Final_Score', ascending=False).iloc[0]
-        except Exception as e: 
-            # print(f"Error en ranking: {e}") # Debug
-            return candidates_df.sample(1, random_state=seed).iloc[0]
+        except: return candidates_df.sample(1, random_state=seed).iloc[0]
 
     bot = get_best(['Pantalón'], 'bot'); 
     top = None
@@ -840,17 +876,41 @@ with tab1:
         st.divider()
 
         if st.session_state['change_mode']:
-            st.info("¿Qué no te convenció?")
+            st.info("¿Qué falló en esta propuesta?")
+            # NUEVO SISTEMA DE RECHAZO CON MOTIVOS
             with st.container(border=True):
-                cf1, cf2, cf3 = st.columns(3)
-                with cf1: n_abr = st.feedback("stars", key="neg_abr")
-                with cf2: n_com = st.feedback("stars", key="neg_com")
-                with cf3: n_seg = st.feedback("stars", key="neg_seg")
+                reason = st.radio("Motivo del rechazo:", 
+                        ["Hace frío/calor para esto", "No combinan los colores", "No tengo ganas de usar esa prenda", "Evento formal/informal"],
+                        horizontal=True)
+
                 if st.button("🎲 Dame otra opción"):
-                    ra = n_abr + 1 if n_abr is not None else 3
-                    entry = {'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada, 'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 'Rating_Abrigo': ra, 'Rating_Comodidad': 3, 'Rating_Seguridad': 3, 'Action': 'Rejected'}
+                    # Ajuste inteligente basado en la razón
+                    ra = 3 # Neutro
+                    if reason == "Hace frío/calor para esto": ra = 1 
+                    
+                    entry = {
+                        'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 
+                        'City': user_city, 
+                        'Temp_Real': weather['temp'], 
+                        'User_Adj_Temp': temp_calculada, 
+                        'Occasion': code_occ, 
+                        'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 
+                        'Rating_Abrigo': ra, 
+                        'Rating_Comodidad': 1, 
+                        'Rating_Seguridad': 1, 
+                        'Action': 'Rejected',
+                        'Reason': reason 
+                    }
                     save_feedback_entry_gsheet(entry)
-                    st.session_state['seed'] = random.randint(1, 1000); st.session_state['change_mode'] = True; st.rerun()
+
+                    # BLACKLIST TEMPORAL (Solo si es capricho)
+                    if 'temp_blacklist' not in st.session_state: st.session_state['temp_blacklist'] = []
+                    if reason == "No tengo ganas de usar esa prenda":
+                        st.session_state['temp_blacklist'].extend([rec_top, rec_bot, rec_out])
+
+                    st.session_state['seed'] = random.randint(1, 1000)
+                    st.session_state['change_mode'] = True
+                    st.rerun()
         
         if outfit_of_the_day is None or st.session_state['change_mode']:
             if st.session_state['confirm_stage'] == 0:
