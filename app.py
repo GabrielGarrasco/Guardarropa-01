@@ -17,60 +17,137 @@ import calendar
 import altair as alt
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="GDI: Mendoza Ops v20.0", layout="centered", page_icon="🧥")
+st.set_page_config(page_title="GDI: Mendoza Ops v21.0", layout="centered", page_icon="🧥")
 
 # ==========================================
-# --- MOTOR DE INTELIGENCIA ARTIFICIAL ---
+# --- MOTOR DE INTELIGENCIA ARTIFICIAL V2.0 (ENHANCED) ---
 # ==========================================
 class OutfitAI:
     def __init__(self):
         self.model = None
-        self.le_occ = LabelEncoder()
-        self.le_cat = LabelEncoder()
+        self.encoders = {} # Diccionario para guardar encoders de cada columna
         self.is_trained = False
+        self.co_occurrence_matrix = {} # Memoria de pares exitosos
+
+    def _extract_features(self, temp, occasion, code):
+        """Desglosa el código SNA en features individuales para la IA"""
+        sna = decodificar_sna(code)
+        if not sna:
+            # Fallback si el código no es estándar
+            return {'Temp': temp, 'Occasion': occasion, 'Season': 'X', 'Attr': '00', 'Color': '99'}
+        
+        return {
+            'Temp': float(temp),
+            'Occasion': str(occasion),
+            'Season': sna['season'],   # Ej: W, V
+            'Attr': sna['attr'],       # Ej: Je, 04, Sh
+            'Color': sna['color']      # Ej: 02, 10
+        }
 
     def train(self, feedback_df, inventory_df):
         if feedback_df.empty or len(feedback_df) < 5: return False 
         try:
             data = feedback_df.copy()
+            # Limpieza de datos
             data['Temp_Real'] = pd.to_numeric(data['Temp_Real'], errors='coerce').fillna(20)
-            data['Target_Score'] = data.apply(lambda x: 0 if x['Action'] == 'Rejected' else ((float(x.get('Rating_Abrigo', 4)) + float(x.get('Rating_Comodidad', 3)) + float(x.get('Rating_Seguridad', 3))) / 15) * 100, axis=1)
+            
+            # --- TARGET PONDERADO ---
+            # Si hace mucho frío o calor, el abrigo importa más.
+            def calculate_weighted_score(row):
+                if row['Action'] == 'Rejected': return 0
+                
+                r_abr = float(row.get('Rating_Abrigo', 4))
+                r_com = float(row.get('Rating_Comodidad', 3))
+                r_seg = float(row.get('Rating_Seguridad', 3))
+                temp = float(row.get('Temp_Real', 20))
+                
+                # Pesos dinámicos
+                w_abr = 2.0 if (temp < 15 or temp > 30) else 1.0
+                w_seg = 1.5 if row['Occasion'] in ['F', 'U'] else 1.0
+                w_com = 1.0
+                
+                total_w = w_abr + w_seg + w_com
+                weighted_avg = ((r_abr * w_abr) + (r_seg * w_seg) + (r_com * w_com)) / total_w
+                return (weighted_avg / 7) * 100 # Normalizado a 100
+
+            data['Target_Score'] = data.apply(calculate_weighted_score, axis=1)
+
+            # --- MATRIZ DE CO-OCURRENCIA ---
+            # Guardamos pares Top+Bot que tuvieron score alto (>70)
+            self.co_occurrence_matrix = {}
+            high_rated = data[data['Target_Score'] > 70]
+            for _, row in high_rated.iterrows():
+                if row['Top'] and row['Bottom']:
+                    pair_key = f"{row['Top']}_{row['Bottom']}"
+                    self.co_occurrence_matrix[pair_key] = self.co_occurrence_matrix.get(pair_key, 0) + 1
+
+            # Preparar Dataset para ML (Feature Engineering)
             training_rows = []
             for _, row in data.iterrows():
+                # Entrenamos por cada prenda individualmente para aprender sus propiedades
                 for part in ['Top', 'Bottom', 'Outer']:
                     code = row[part]
                     if code and code not in ['N/A', 'nan', 'None', '']:
-                        # Buscar en inventario (incluso si está archivado para entrenar)
-                        cat_matches = inventory_df[inventory_df['Code'] == code]['Category'].values
-                        cat_val = cat_matches[0] if len(cat_matches) > 0 else 'Unknown'
-                        code_num = int(''.join(filter(str.isdigit, str(code)))) if any(c.isdigit() for c in str(code)) else 0
-                        training_rows.append({'Temp': row['Temp_Real'], 'Occasion': str(row['Occasion']), 'Category': str(cat_val), 'Code_Numeric': code_num, 'Score': row['Target_Score']})
+                        features = self._extract_features(row['Temp_Real'], row['Occasion'], code)
+                        features['Score'] = row['Target_Score']
+                        training_rows.append(features)
+            
             df_train = pd.DataFrame(training_rows)
             if df_train.empty: return False
-            self.le_occ.fit(df_train['Occasion'].unique())
-            self.le_cat.fit(df_train['Category'].unique()) 
-            df_train['Occasion_Enc'] = self.le_occ.transform(df_train['Occasion'])
-            df_train['Category_Enc'] = self.le_cat.transform(df_train['Category'])
-            X = df_train[['Temp', 'Occasion_Enc', 'Category_Enc', 'Code_Numeric']]
+
+            # Encoding de variables categóricas
+            cat_cols = ['Occasion', 'Season', 'Attr', 'Color']
+            X = df_train[['Temp'] + cat_cols].copy()
             y = df_train['Score']
-            self.model = RandomForestRegressor(n_estimators=100, random_state=42)
+
+            for col in cat_cols:
+                le = LabelEncoder()
+                # Truco: Ajustamos con los valores presentes Y 'Unknown' para robustez
+                le.fit(list(X[col].unique()) + ['Unknown'])
+                self.encoders[col] = le
+                X[col] = le.transform(X[col])
+
+            # Modelo: Random Forest con más árboles y límite de profundidad para generalizar mejor
+            self.model = RandomForestRegressor(n_estimators=200, max_depth=10, random_state=42)
             self.model.fit(X, y)
             self.is_trained = True
             return True
-        except: return False
+        except Exception as e:
+            # print(f"Error training: {e}") # Debug off
+            return False
 
-    def predict_score(self, item_row, current_temp, occasion_code):
+    def predict_score(self, item_row, current_temp, occasion_code, partner_code=None):
         if not self.is_trained: return 50.0 
         try:
-            occ_str = str(occasion_code)
-            occ_val = self.le_occ.transform([occ_str])[0] if occ_str in self.le_occ.classes_ else 0
-            cat_str = str(item_row['Category'])
-            cat_val = self.le_cat.transform([cat_str])[0] if cat_str in self.le_cat.classes_ else 0
-            code_num = int(''.join(filter(str.isdigit, str(item_row['Code'])))) if any(c.isdigit() for c in str(item_row['Code'])) else 0
-            features = np.array([[current_temp, occ_val, cat_val, code_num]])
-            predicted_score = self.model.predict(features)[0]
+            # 1. Predicción Base (ML)
+            features = self._extract_features(current_temp, occasion_code, item_row['Code'])
+            
+            # Vector de entrada para el modelo
+            input_vector = [features['Temp']]
+            for col in ['Occasion', 'Season', 'Attr', 'Color']:
+                val = features[col]
+                # Manejo de valores nuevos no vistos en entrenamiento
+                if col in self.encoders:
+                    if val not in self.encoders[col].classes_: val = 'Unknown'
+                    input_vector.append(self.encoders[col].transform([val])[0])
+                else:
+                     input_vector.append(0) # Fallback
+            
+            input_np = np.array([input_vector])
+            predicted_score = self.model.predict(input_np)[0]
+
+            # 2. Penalización por Desgaste (Lógica original mantenida)
             uses = int(float(item_row['Uses'])) if item_row['Uses'] not in ['', 'nan'] else 0
             if uses > 2: predicted_score -= 15 
+
+            # 3. Bonus por Co-ocurrencia (La IA recuerda si esta combinación fue un éxito)
+            if partner_code:
+                # Chequeamos ambos órdenes por las dudas
+                pair_1 = f"{item_row['Code']}_{partner_code}"
+                pair_2 = f"{partner_code}_{item_row['Code']}"
+                if pair_1 in self.co_occurrence_matrix or pair_2 in self.co_occurrence_matrix:
+                    predicted_score += 10 # Boost por combinación probada
+
             return predicted_score
         except: return 50.0
 
@@ -225,7 +302,7 @@ def check_harmony(code_top, code_bot):
     if c_b in forbidden.get(c_t, []): return False
     return True
 
-# --- CLIMA LOCAL (MODIFICADO: Agregado Viento y Humedad) ---
+# --- CLIMA LOCAL (Con Viento y Humedad) ---
 def get_weather_open_meteo():
     try:
         # Se agregan wind_speed_10m y relative_humidity_2m
@@ -249,8 +326,8 @@ def get_weather_open_meteo():
             "desc": desc, 
             "hourly_temp": hourly.get('temperature_2m', []), 
             "hourly_time": hourly.get('time', []),
-            "wind": current.get('wind_speed_10m', 0),        # NUEVO
-            "humidity": current.get('relative_humidity_2m', 50) # NUEVO
+            "wind": current.get('wind_speed_10m', 0),
+            "humidity": current.get('relative_humidity_2m', 50)
         }
     except: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error Conexión", "hourly_temp": [], "hourly_time": [], "wind": 0, "humidity": 50}
 
@@ -309,11 +386,11 @@ def create_outfit_canvas(top_code, bot_code, out_code, df_inv):
     except: return None
 
 # ==========================================
-# --- LÓGICA DE NEGOCIO ---
+# --- LÓGICA DE NEGOCIO (UPDATED) ---
 # ==========================================
 
-def calculate_smart_score(item_row, current_temp, occasion, feedback_df, weather_data=None):
-    # 1. Base Score AI (Gustos)
+def calculate_smart_score(item_row, current_temp, occasion, feedback_df, weather_data=None, partner_code=None):
+    # 1. Base Score AI (Gustos + Co-ocurrencia)
     ai = st.session_state.get('outfit_ai')
     gusto_score = 50.0
     
@@ -322,7 +399,8 @@ def calculate_smart_score(item_row, current_temp, occasion, feedback_df, weather
         ai.train(feedback_df, inv_ref)
     
     if ai and ai.is_trained: 
-        gusto_score = ai.predict_score(item_row, current_temp, occasion)
+        # MODIFICADO: Pasamos el partner_code a la AI
+        gusto_score = ai.predict_score(item_row, current_temp, occasion, partner_code)
     else:
         # Fallback si no hay AI entrenada
         item_code = item_row['Code']
@@ -339,7 +417,7 @@ def calculate_smart_score(item_row, current_temp, occasion, feedback_df, weather
                     gusto_score = (avg_rating / 5) * 100
                 except: pass
 
-    # --- NUEVO: LÓGICA COOLDOWN (ROTACIÓN) ---
+    # --- LÓGICA COOLDOWN (ROTACIÓN) ---
     try:
         if item_row['LastWorn'] not in ['', 'nan', 'None']:
             last_date = datetime.strptime(str(item_row['LastWorn']), "%Y-%m-%d").date()
@@ -351,7 +429,7 @@ def calculate_smart_score(item_row, current_temp, occasion, feedback_df, weather
             elif days_diff <= 3: gusto_score -= 15 # Hace poco
     except: pass
 
-    # --- NUEVO: LÓGICA DE VIENTO Y ZONDA ---
+    # --- LÓGICA DE VIENTO Y ZONDA ---
     if weather_data:
         wind = weather_data.get('wind', 0)
         sna = decodificar_sna(item_row['Code'])
@@ -459,7 +537,7 @@ def recommend_outfit(df, weather, occasion, seed):
             coat_msg = "☀️ No hace falta abrigo hoy."
             needs_coat = False
 
-    # --- NUEVO: ALERTA ZONDA ---
+    # --- ALERTA ZONDA ---
     if w_speed > 30 and w_hum < 30:
         coat_msg += " ⚠️ ALERTA ZONDA: Viento y tierra."
 
@@ -510,9 +588,12 @@ def recommend_outfit(df, weather, occasion, seed):
 
         try:
             candidates_df = candidates_df.copy()
-            # Pasamos weather (con viento) a la funcion de score
-            candidates_df['AI_Score'] = candidates_df.apply(lambda x: calculate_smart_score(x, t_curr, occasion, fb, weather), axis=1)
-            candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df.apply(lambda x: random.uniform(-5, 5), axis=1)
+            # MODIFICADO: Pasamos selected_partner_code y weather a calculate_smart_score
+            candidates_df['AI_Score'] = candidates_df.apply(
+                lambda x: calculate_smart_score(x, t_curr, occasion, fb, weather, selected_partner_code), 
+                axis=1
+            )
+            candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df.apply(lambda x: random.uniform(-2, 2), axis=1)
             return candidates_df.sort_values('Final_Score', ascending=False).iloc[0]
         except: return candidates_df.sample(1, random_state=seed).iloc[0]
 
@@ -536,7 +617,7 @@ def recommend_outfit(df, weather, occasion, seed):
 # --- INTERFAZ PRINCIPAL ---
 # ==========================================
 st.sidebar.title("GDI: Mendoza Ops")
-st.sidebar.caption("v20.0 - Marie Kondo")
+st.sidebar.caption("v21.0 - Deep Learning")
 
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
