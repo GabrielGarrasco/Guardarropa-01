@@ -418,6 +418,56 @@ st.sidebar.caption("v17.2 - Lite Edition")
 user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
 code_occ = user_occ[0]
+# --- VENTANA: TU LOOK DE HOY ---
+    st.markdown("---")
+    st.markdown("###### 🧢 Hoy llevas puesto:")
+    
+    try:
+        # Cargamos el historial para ver qué confirmaste hoy
+        fb_side = load_feedback_gsheet()
+        found_today = False
+        
+        if not fb_side.empty and 'Action' in fb_side.columns:
+            today_date = get_mendoza_time().strftime("%Y-%m-%d")
+            # Filtramos: Que sea de hoy Y que esté "Accepted"
+            match_today = fb_side[(fb_side['Date'].astype(str).str.contains(today_date, na=False)) & (fb_side['Action'] == 'Accepted')]
+            
+            if not match_today.empty:
+                found_today = True
+                last_fit = match_today.iloc[-1] # Tomamos el último confirmado
+                
+                # Función auxiliar para mostrar imagen pequeña o código
+                def mostrar_mini_sidebar(code, label):
+                    if code and code not in ['N/A', 'nan', 'None', '']:
+                        item_data = df[df['Code'] == code]
+                        if not item_data.empty:
+                            img_url = item_data.iloc[0]['ImageURL']
+                            if img_url and len(str(img_url)) > 5:
+                                st.image(cargar_imagen_desde_url(img_url), use_container_width=True)
+                            else:
+                                st.caption(f"{code}")
+                        else:
+                            st.caption(f"{code}")
+                    else:
+                        st.caption("-")
+
+                # Mostramos las prendas en columnas pequeñas
+                c_s1, c_s2, c_s3 = st.columns(3)
+                with c_s1: 
+                    st.caption("Top")
+                    mostrar_mini_sidebar(last_fit['Top'], "Top")
+                with c_s2: 
+                    st.caption("Bot")
+                    mostrar_mini_sidebar(last_fit['Bottom'], "Bot")
+                with c_s3: 
+                    st.caption("Out")
+                    mostrar_mini_sidebar(last_fit['Outer'], "Out")
+            
+        if not found_today:
+            st.info("🤷‍♂️ Aún no registraste nada hoy.")
+            
+    except Exception as e:
+        st.error("Error al cargar.")
 
 if 'last_occ_viewed' not in st.session_state: st.session_state['last_occ_viewed'] = code_occ
 if st.session_state['last_occ_viewed'] != code_occ:
