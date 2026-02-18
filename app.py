@@ -588,14 +588,42 @@ def recommend_outfit(df, weather, occasion, seed):
 
         try:
             candidates_df = candidates_df.copy()
-            # MODIFICADO: Pasamos selected_partner_code y weather a calculate_smart_score
+            
+            # 1. Calculamos el Score Base de la IA (Gustos + Clima)
             candidates_df['AI_Score'] = candidates_df.apply(
                 lambda x: calculate_smart_score(x, t_curr, occasion, fb, weather, selected_partner_code), 
                 axis=1
             )
-            candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df.apply(lambda x: random.uniform(-2, 2), axis=1)
+
+            # --- NUEVA LÓGICA: CURIOSIDAD (EXPLORACIÓN VS EXPLOTACIÓN) ---
+            # Generamos un número al azar. Si es menor a 0.1 (10%), la IA se pone "curiosa".
+            exploration_mode = random.random() < 0.1 
+
+            if exploration_mode:
+                # MODO CURIOSIDAD:
+                # Ignora un poco si combina perfecto, y prioriza prendas que tienes OLVIDADAS (Poco uso).
+                # (10 - Uses) significa: si tiene 0 usos, suma 50 puntos. Si tiene 10 usos, suma 0.
+                candidates_df['Exploration_Boost'] = (10 - pd.to_numeric(candidates_df['Uses'], errors='coerce').fillna(0).clip(upper=10)) * 5
+                candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df['Exploration_Boost']
+                # Opcional: Avisar en consola o toast
+                # print("Modo Exploración activo") 
+            else:
+                # MODO NORMAL (LO MEJOR):
+                # Sumamos puntos si los colores combinan bien (Armonía)
+                candidates_df['Color_Harmony'] = 0
+                if selected_partner_code:
+                     candidates_df['Color_Harmony'] = candidates_df.apply(
+                        lambda x: 15 if check_harmony(x['Code'], selected_partner_code) else -15, 
+                        axis=1
+                    )
+                
+                # Score Final = IA + Armonía + Pequeña variación para que no sea robótico
+                candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df['Color_Harmony'] + candidates_df.apply(lambda x: random.uniform(-1, 1), axis=1)
+
             return candidates_df.sort_values('Final_Score', ascending=False).iloc[0]
-        except: return candidates_df.sample(1, random_state=seed).iloc[0]
+        except Exception as e: 
+            # print(f"Error en ranking: {e}") # Debug
+            return candidates_df.sample(1, random_state=seed).iloc[0]
 
     bot = get_best(['Pantalón'], 'bot'); 
     top = None
