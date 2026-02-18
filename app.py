@@ -16,22 +16,32 @@ from sklearn.preprocessing import LabelEncoder
 import calendar
 import altair as alt
 import colorsys
-import telebot
+import telebot # <--- IMPORTANTE: Importamos la librería aquí
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="GDI: Mendoza Ops v21.0", layout="centered", page_icon="🧥")
 
 # ==========================================
-# --- CONFIGURACIÓN DE SECRETOS ---
-# Ya no escribimos los datos aquí, los leemos de la caja fuerte de la nube
+# --- CONFIGURACIÓN DE SECRETOS Y BOT ---
+# ==========================================
 try:
+    # 1. Recuperar credenciales
     TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
     TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
-    # También tus credenciales de Google Sheets deberían venir de aquí
-    # (Más abajo te explico cómo configurar esto en la nube)
-except:
-    st.error("Faltan configurar los secretos en Streamlit Cloud.")
+    
+    # 2. INICIALIZAR EL BOT AQUÍ (GLOBALMENTE)
+    # Esto hace que 'bot' exista para todo el resto del código
+    bot = telebot.TeleBot(TELEGRAM_TOKEN) 
+    
+except Exception as e:
+    st.error(f"Error cargando secretos o iniciando Bot: {e}")
+    # Definimos bot como None para que no rompa el resto si fallan los secretos
+    bot = None 
 
+# ==========================================
+# --- MOTOR DE INTELIGENCIA ARTIFICIAL V3.0 (NEURAL STYLE) ---
+# ==========================================
+# (Aquí sigue tu clase OutfitAI tal cual la tenías...)
 # ==========================================
 # --- MOTOR DE INTELIGENCIA ARTIFICIAL V3.0 (NEURAL STYLE) ---
 # ==========================================
