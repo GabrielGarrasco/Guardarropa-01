@@ -458,104 +458,86 @@ def enviar_foto_telegram(caption, image):
         return False, f"Error de conexión: {str(e)}"
 
 def enviar_briefing_diario():
-    """Genera el reporte completo y lo envía."""
+    """Genera el reporte completo y lo envía (Apto para Automatización)."""
     try:
-        # 1. Obtener Clima Base
+        # --- MODO AUTÓNOMO: Cargar datos si no hay sesión activa ---
+        # Si esto corre automático, st.session_state puede estar vacío o no ser accesible igual.
+        # Cargamos el inventario fresco directamente si no lo encontramos.
+        if 'inventory' in st.session_state and not st.session_state['inventory'].empty:
+            df_inv = st.session_state['inventory']
+        else:
+            df_inv = load_data_gsheet() # Carga fresca desde la nube
+            
+        if df_inv.empty: return False, "Error: No se pudo cargar el inventario."
+
+        # 1. Clima Base
         w_data = get_weather_open_meteo()
         
-        # 2. Obtener Probabilidad de Lluvia (Consulta Adicional)
+        # 2. Probabilidad de Lluvia
         rain_warning = ""
         try:
             url_rain = "https://api.open-meteo.com/v1/forecast?latitude=-32.8908&longitude=-68.8272&hourly=precipitation_probability&timezone=auto&forecast_days=1"
             res_rain = requests.get(url_rain).json()
             probs = res_rain['hourly']['precipitation_probability']
             times = res_rain['hourly']['time']
-            
             now_hour = datetime.now().hour
             rain_hits = []
-            
-            # Revisar las próximas 12 horas
             for i in range(now_hour, min(now_hour + 12, len(probs))):
                 if probs[i] > 30:
                     rain_hits.append(f"{datetime.fromisoformat(times[i]).strftime('%H:%M')} ({probs[i]}%)")
-            
-            if rain_hits:
-                rain_warning = f"\n☔ *ALERTA LLUVIA:* Probabilidad alta a las: {', '.join(rain_hits)}"
-            else:
-                rain_warning = "\n✅ Sin lluvias próximas."
-        except:
-            rain_warning = "\n⚠️ No se pudo verificar lluvias."
+            if rain_hits: rain_warning = f"\n☔ *ALERTA LLUVIA:* Probabilidad alta: {', '.join(rain_hits)}"
+            else: rain_warning = "\n✅ Sin lluvias próximas."
+        except: rain_warning = ""
 
-        # 3. Gestión de Abrigo (Lógica horaria estricta < 18°C)
+        # 3. Abrigo
         coat_schedule = ""
         hourly_temps = w_data.get('hourly_temp', [])
         hourly_times = w_data.get('hourly_time', [])
-        
         cold_hours = []
         now = datetime.now()
         for t, time_str in zip(hourly_temps, hourly_times):
             dt = datetime.fromisoformat(time_str)
-            if dt.day == now.day and dt.hour >= now.hour: # Solo horas futuras de hoy
-                if t < 18:
-                    cold_hours.append(dt.hour)
-        
+            if dt.day == now.day and dt.hour >= now.hour:
+                if t < 18: cold_hours.append(dt.hour)
         if cold_hours:
-            start = min(cold_hours)
-            end = max(cold_hours)
-            if len(cold_hours) == (end - start + 1):
-                coat_schedule = f"\n🧥 *ABRIGO:* Obligatorio de {start}:00 a {end}:00 hs (<18°C)."
-            else:
-                coat_schedule = f"\n🧥 *ABRIGO:* Necesario en bloques entre {start}:00 y {end}:00 hs."
+            coat_schedule = f"\n🧥 *ABRIGO:* Necesario entre {min(cold_hours)}:00 y {max(cold_hours)}:00 hs."
         else:
-            coat_schedule = "\n👕 Clima agradable, abrigo ligero o nulo."
+            coat_schedule = "\n👕 Clima agradable."
 
-        # 4. Gestión de Lavandería
+        # 4. Lavandería
         laundry_msg = ""
-        if 'inventory' in st.session_state:
-            inv = st.session_state['inventory']
-            dirty_count = len(inv[inv['Status'] == 'Sucio'])
-            clean_shirts = len(inv[(inv['Category'].isin(['Remera', 'Camisa'])) & (inv['Status'] == 'Limpio')])
-            
-            if dirty_count > 5:
-                laundry_msg += f"\n🧺 *LAVANDERÍA:* Acumulaste {dirty_count} prendas sucias."
-            if clean_shirts < 3:
-                laundry_msg += f"\n⚠️ *URGENTE:* Quedan solo {clean_shirts} remeras limpias."
+        dirty_count = len(df_inv[df_inv['Status'] == 'Sucio'])
+        clean_shirts = len(df_inv[(df_inv['Category'].isin(['Remera', 'Camisa'])) & (df_inv['Status'] == 'Limpio')])
+        if dirty_count > 5: laundry_msg += f"\n🧺 *LAVANDERÍA:* {dirty_count} prendas sucias acumuladas."
+        if clean_shirts < 3: laundry_msg += f"\n⚠️ *URGENTE:* Solo quedan {clean_shirts} remeras limpias."
 
-        # 5. Generar Canvas del Outfit (Simulamos una recomendación fresca si no hay una fija)
-        occ_brief = st.session_state.get('last_occ_viewed', 'U') 
-        df_inv = st.session_state.get('inventory', pd.DataFrame())
+        # 5. Canvas
+        # Si es automático, usamos 'U' (Universidad) por defecto
+        occ_brief = 'U' 
+        recs, _, _ = recommend_outfit(df_inv, w_data, occ_brief, random.randint(1, 10000))
         
-        recs, _, _ = recommend_outfit(df_inv, w_data, occ_brief, random.randint(1, 1000))
-        
-        if recs.empty:
-            return False, "No se pudo generar recomendación (falta ropa)."
+        if recs.empty: return False, "Falta ropa para generar outfit."
 
         r_top = recs[recs['Category'].isin(['Remera', 'Camisa'])].iloc[0]['Code'] if not recs[recs['Category'].isin(['Remera', 'Camisa'])].empty else None
         r_bot = recs[recs['Category'] == 'Pantalón'].iloc[0]['Code'] if not recs[recs['Category'] == 'Pantalón'].empty else None
         r_out = recs[recs['Category'].isin(['Campera', 'Buzo'])].iloc[0]['Code'] if not recs[recs['Category'].isin(['Campera', 'Buzo'])].empty else None
         
         canvas = create_outfit_canvas(r_top, r_bot, r_out, df_inv)
-        if not canvas:
-            return False, "No se pudo generar el canvas visual."
+        if not canvas: return False, "Error generando imagen."
 
-        # 6. Construir Mensaje Final
+        # 6. Enviar
         mensaje = (
-            f"🚀 *GDI MENDOZA OPS - BRIEFING DIARIO*\n"
-            f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')}\n\n"
-            f"🌡️ *Clima Actual:* {w_data['temp']}°C (ST {w_data['feels_like']}°C)\n"
-            f"📝 {w_data['desc']}\n"
-            f"{rain_warning}"
-            f"{coat_schedule}"
-            f"\n\n👔 *Outfit Sugerido ({occ_brief}):*"
-            f"\n• Top: {r_top}\n• Bot: {r_bot}\n• Out: {r_out}"
+            f"🚀 *GDI AUTO-BRIEFING*\n"
+            f"📅 {datetime.now().strftime('%d/%m %H:%M')}\n\n"
+            f"🌡️ {w_data['temp']}°C (ST {w_data['feels_like']}°C) - {w_data['desc']}\n"
+            f"{rain_warning}{coat_schedule}\n\n"
+            f"👔 *Propuesta ({occ_brief}):*\n• {r_top}\n• {r_bot}\n• {r_out}"
             f"{laundry_msg}"
         )
-
-        ok, status = enviar_foto_telegram(mensaje, canvas)
-        return ok, status
+        return enviar_foto_telegram(mensaje, canvas)
 
     except Exception as e:
-        return False, f"Error interno briefing: {str(e)}"
+        return False, f"Error loop: {str(e)}"
 
 # ==========================================
 # --- LÓGICA DE NEGOCIO (PHYSICS & ROTATION) ---
@@ -1588,3 +1570,34 @@ with tab7:
                     st.rerun()
     else:
         st.caption("No hay eventos futuros.")
+# ==========================================
+# --- AUTOMATIZACIÓN (BACKGROUND THREAD) ---
+# ==========================================
+import threading
+import time
+
+def background_scheduler():
+    """Chequea la hora cada minuto y dispara el briefing a las 08:00 AM."""
+    while True:
+        # Obtener hora Mendoza
+        now_mza = datetime.now(pytz.timezone('America/Argentina/Mendoza'))
+        
+        # Configura aquí tu hora deseada (ej: 08:00)
+        if now_mza.hour == 8 and now_mza.minute == 0:
+            print("⏰ Hora del briefing automático...")
+            ok, msg = enviar_briefing_diario()
+            print(f"Resultado Auto: {msg}")
+            
+            # Dormir 65 segundos para no enviar doble en el mismo minuto
+            time.sleep(65)
+        
+        # Revisar cada 30 segundos
+        time.sleep(30)
+
+# Iniciamos el thread solo una vez al arrancar la app
+if 'scheduler_started' not in st.session_state:
+    # Daemon=True significa que si cierras la app, el thread muere (seguridad)
+    t = threading.Thread(target=background_scheduler, daemon=True)
+    t.start()
+    st.session_state['scheduler_started'] = True
+    print("✅ Sistema de automatización activado en segundo plano.")
