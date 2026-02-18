@@ -225,12 +225,13 @@ def check_harmony(code_top, code_bot):
     if c_b in forbidden.get(c_t, []): return False
     return True
 
-# --- CLIMA LOCAL ---
+# --- CLIMA LOCAL (MODIFICADO: Agregado Viento y Humedad) ---
 def get_weather_open_meteo():
     try:
-        url = "https://api.open-meteo.com/v1/forecast?latitude=-32.8908&longitude=-68.8272&current=temperature_2m,apparent_temperature,weather_code&daily=temperature_2m_max,temperature_2m_min&hourly=temperature_2m&timezone=auto"
+        # Se agregan wind_speed_10m y relative_humidity_2m
+        url = "https://api.open-meteo.com/v1/forecast?latitude=-32.8908&longitude=-68.8272&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m&daily=temperature_2m_max,temperature_2m_min&hourly=temperature_2m&timezone=auto"
         res = requests.get(url).json()
-        if 'current' not in res: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error API", "hourly_temp": [], "hourly_time": []}
+        if 'current' not in res: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error API", "hourly_temp": [], "hourly_time": [], "wind": 0, "humidity": 50}
         current = res['current']
         daily = res['daily']
         hourly = res.get('hourly', {})
@@ -240,8 +241,18 @@ def get_weather_open_meteo():
         elif code in [45, 48]: desc = "Niebla"
         elif code >= 51: desc = "Lluvia/Llovizna"
         elif code >= 95: desc = "Tormenta"
-        return {"temp": current['temperature_2m'], "feels_like": current['apparent_temperature'], "min": daily['temperature_2m_min'][0], "max": daily['temperature_2m_max'][0], "desc": desc, "hourly_temp": hourly.get('temperature_2m', []), "hourly_time": hourly.get('time', [])}
-    except: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error Conexión", "hourly_temp": [], "hourly_time": []}
+        return {
+            "temp": current['temperature_2m'], 
+            "feels_like": current['apparent_temperature'], 
+            "min": daily['temperature_2m_min'][0], 
+            "max": daily['temperature_2m_max'][0], 
+            "desc": desc, 
+            "hourly_temp": hourly.get('temperature_2m', []), 
+            "hourly_time": hourly.get('time', []),
+            "wind": current.get('wind_speed_10m', 0),        # NUEVO
+            "humidity": current.get('relative_humidity_2m', 50) # NUEVO
+        }
+    except: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error Conexión", "hourly_temp": [], "hourly_time": [], "wind": 0, "humidity": 50}
 
 # --- FUNCIONES VIAJE ---
 def get_city_coords(city_name):
@@ -301,27 +312,61 @@ def create_outfit_canvas(top_code, bot_code, out_code, df_inv):
 # --- LÓGICA DE NEGOCIO ---
 # ==========================================
 
-def calculate_smart_score(item_row, current_temp, occasion, feedback_df):
+def calculate_smart_score(item_row, current_temp, occasion, feedback_df, weather_data=None):
+    # 1. Base Score AI (Gustos)
     ai = st.session_state.get('outfit_ai')
+    gusto_score = 50.0
+    
     if ai and not ai.is_trained and not feedback_df.empty:
         inv_ref = st.session_state.get('inventory', pd.DataFrame())
         ai.train(feedback_df, inv_ref)
-    if ai and ai.is_trained: return ai.predict_score(item_row, current_temp, occasion)
-    item_code = item_row['Code']
-    base_score = 50.0 
-    if feedback_df.empty: return base_score
-    cols_to_check = [c for c in ['Top', 'Bottom', 'Outer'] if c in feedback_df.columns]
-    mask = pd.Series(False, index=feedback_df.index)
-    for col in cols_to_check: mask |= (feedback_df[col] == item_code)
-    history = feedback_df[mask]
-    if history.empty: return base_score
+    
+    if ai and ai.is_trained: 
+        gusto_score = ai.predict_score(item_row, current_temp, occasion)
+    else:
+        # Fallback si no hay AI entrenada
+        item_code = item_row['Code']
+        if not feedback_df.empty:
+            cols_to_check = [c for c in ['Top', 'Bottom', 'Outer'] if c in feedback_df.columns]
+            mask = pd.Series(False, index=feedback_df.index)
+            for col in cols_to_check: mask |= (feedback_df[col] == item_code)
+            history = feedback_df[mask]
+            if not history.empty:
+                try:
+                    s_val = pd.to_numeric(history['Rating_Seguridad'], errors='coerce').mean()
+                    c_val = pd.to_numeric(history['Rating_Comodidad'], errors='coerce').mean()
+                    avg_rating = (s_val + c_val) / 2
+                    gusto_score = (avg_rating / 5) * 100
+                except: pass
+
+    # --- NUEVO: LÓGICA COOLDOWN (ROTACIÓN) ---
     try:
-        s_val = pd.to_numeric(history['Rating_Seguridad'], errors='coerce').mean()
-        c_val = pd.to_numeric(history['Rating_Comodidad'], errors='coerce').mean()
-        avg_rating = (s_val + c_val) / 2
-        gusto_score = (avg_rating / 5) * 100
-        if pd.isna(gusto_score): gusto_score = 50
-    except: gusto_score = 50
+        if item_row['LastWorn'] not in ['', 'nan', 'None']:
+            last_date = datetime.strptime(str(item_row['LastWorn']), "%Y-%m-%d").date()
+            today = get_mendoza_time().date()
+            days_diff = (today - last_date).days
+            
+            # Penalización fuerte si se usó hace menos de 4 días
+            if days_diff <= 1: gusto_score -= 30 # Ayer
+            elif days_diff <= 3: gusto_score -= 15 # Hace poco
+    except: pass
+
+    # --- NUEVO: LÓGICA DE VIENTO Y ZONDA ---
+    if weather_data:
+        wind = weather_data.get('wind', 0)
+        sna = decodificar_sna(item_row['Code'])
+        
+        if sna:
+            # Si hay viento fuerte (> 25 km/h)
+            if wind > 25:
+                # Premiar Rompevientos (Outer con attr '01')
+                if item_row['Category'] in ['Campera', 'Buzo'] and sna['attr'] == '01':
+                    gusto_score += 20
+                
+                # Penalizar prendas cortas o muy abiertas si hace frío
+                if current_temp < 20 and item_row['Category'] == 'Pantalón' and sna['attr'] in ['Sh', 'DC']:
+                    gusto_score -= 15
+    
     return gusto_score
 
 def is_item_usable(row):
@@ -384,6 +429,11 @@ def recommend_outfit(df, weather, occasion, seed):
     t_max = weather['max']
     t_min = weather['min']
     t_feel = weather.get('feels_like', t_curr) + personal_offset 
+    
+    # Datos de Viento/Humedad
+    w_speed = weather.get('wind', 0)
+    w_hum = weather.get('humidity', 50)
+
     final = []
     
     coat_msg = ""
@@ -392,6 +442,7 @@ def recommend_outfit(df, weather, occasion, seed):
     hourly_times = weather.get('hourly_time', [])
     UMBRAL_FRIO = 18 
     
+    # Lógica de Abrigo y Avisos de Clima
     if hourly_temps and hourly_times:
         hours_cold = []
         now_date = get_mendoza_time().date()
@@ -407,6 +458,10 @@ def recommend_outfit(df, weather, occasion, seed):
         else:
             coat_msg = "☀️ No hace falta abrigo hoy."
             needs_coat = False
+
+    # --- NUEVO: ALERTA ZONDA ---
+    if w_speed > 30 and w_hum < 30:
+        coat_msg += " ⚠️ ALERTA ZONDA: Viento y tierra."
 
     target_occs = [occasion]
     if occasion in ['F', 'U']:
@@ -455,7 +510,8 @@ def recommend_outfit(df, weather, occasion, seed):
 
         try:
             candidates_df = candidates_df.copy()
-            candidates_df['AI_Score'] = candidates_df.apply(lambda x: calculate_smart_score(x, t_curr, occasion, fb), axis=1)
+            # Pasamos weather (con viento) a la funcion de score
+            candidates_df['AI_Score'] = candidates_df.apply(lambda x: calculate_smart_score(x, t_curr, occasion, fb, weather), axis=1)
             candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df.apply(lambda x: random.uniform(-5, 5), axis=1)
             return candidates_df.sort_values('Final_Score', ascending=False).iloc[0]
         except: return candidates_df.sample(1, random_state=seed).iloc[0]
@@ -606,7 +662,7 @@ with tab1:
     with st.container(border=True):
         col_w1, col_w2, col_w3 = st.columns(3)
         col_w1.metric("Clima", f"{weather['temp']}°C", weather['desc'])
-        col_w2.metric("Sensación", f"{weather['feels_like']}°C", f"Max: {weather['max']}°")
+        col_w2.metric("Sensación", f"{weather['feels_like']}°C", f"Wind: {weather['wind']}km/h")
         offset_val = temp_calculada - weather.get('feels_like', weather['temp'])
         col_w3.metric("Perfil", f"{temp_calculada:.1f}°C", f"{offset_val:+.1f}°C (Smart)")
         if coat_advice: st.markdown(f"**{coat_advice}**")
