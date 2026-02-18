@@ -21,10 +21,15 @@ import colorsys
 st.set_page_config(page_title="GDI: Mendoza Ops v21.0", layout="centered", page_icon="🧥")
 
 # ==========================================
-# --- CREDENCIALES TELEGRAM (EDITAR AQUÍ) ---
-# ==========================================
-TELEGRAM_TOKEN = "8562142445:AAF3HNR1WmPRCgCvGAiEbNRmIiVKIQsyZUE"      # <--- PEGA TU TOKEN DENTRO DE LAS COMILLAS
-TELEGRAM_CHAT_ID = "1462139551"  # <--- PEGA TU CHAT ID DENTRO DE LAS COMILLAS
+# --- CONFIGURACIÓN DE SECRETOS ---
+# Ya no escribimos los datos aquí, los leemos de la caja fuerte de la nube
+try:
+    TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
+    TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
+    # También tus credenciales de Google Sheets deberían venir de aquí
+    # (Más abajo te explico cómo configurar esto en la nube)
+except:
+    st.error("Faltan configurar los secretos en Streamlit Cloud.")
 
 # ==========================================
 # --- MOTOR DE INTELIGENCIA ARTIFICIAL V3.0 (NEURAL STYLE) ---
