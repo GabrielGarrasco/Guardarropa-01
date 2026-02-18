@@ -963,10 +963,13 @@ with tab5:
         else: st.success("¡Rotación impecable!")
 
 with tab6:
-    st.header("✈️ Modo Viaje v3.0 (Smart)") 
+    st.header("✈️ Modo Viaje v3.0 (Smart - Filtrado)") 
     col_dest, col_days = st.columns([2, 1])
     with col_dest: dest_city = st.text_input("📍 Destino", value="Buenos Aires")
-    with col_days: num_days = st.number_input("📅 Días", min_value=1, max_value=30, value=5)
+    with col_days: num_days = st.number_input("📅 Días Totales", min_value=1, max_value=30, value=5)
+
+    # --- NUEVO: Selector de días de deporte para cumplir el requisito de "Exclusivo Deportiva" ---
+    num_sports = st.slider("🏋️ ¿Cuántos días harás deporte?", 0, num_days, 0)
 
     if 'travel_weather' not in st.session_state: st.session_state['travel_weather'] = None
 
@@ -991,6 +994,161 @@ with tab6:
                                 st.metric(label=f"{get_weather_emoji(c)} {day_name}", value=f"{int(mx)}°", delta=f"{int(mn)}° min")
                 else: st.error("No se pudo obtener el clima.")
             else: st.error("Ciudad no encontrada.")
+    
+    st.divider()
+    if st.button("🎒 Generar Propuesta de Valija", type="primary", use_container_width=True):
+        # 1. Filtramos solo ropa limpia
+        packable = df[df['Status'] == 'Limpio']
+        forecast = st.session_state.get('travel_weather')
+        
+        if packable.empty: 
+            st.error("¡No tenés ropa limpia para viajar!")
+        else:
+            # --- Configuración de Cantidades ---
+            # Regla: 1 Pijama (Casa) + Ropa de Deporte (D) + Ropa de Salida (U/F)
+            
+            # Calculamos días "de calle" (restando deporte si es que te cambias exclusivamente para eso)
+            # Asumimos que la ropa de deporte es 1 cambio por día de deporte
+            target_street_days = max(1, num_days - num_sports) 
+            
+            # Cálculo de prendas necesarias
+            req_daily_tops = target_street_days 
+            req_daily_bots = (target_street_days // 2) + 1 # Se repite pantalón cada 2 días
+            
+            req_sport_tops = num_sports
+            req_sport_bots = num_sports # Asumimos 1 pantalón por sesión de deporte para no repetir sudor
+            
+            # --- CREACIÓN DE POOLS (FILTROS STRICTOS) ---
+            
+            # A. Pool CASA (Solo para dormir - 1 prenda/conjunto)
+            pool_home = packable[packable['Occasion'] == 'C']
+            
+            # B. Pool DEPORTE (Estrictamente categoría 'D')
+            pool_sport = packable[packable['Occasion'] == 'D']
+            
+            # C. Pool CALLE (Estrictamente 'U' o 'F')
+            pool_street = packable[packable['Occasion'].isin(['U', 'F'])]
+            
+            # Pool Abrigos (General, tomamos de U, F o D neutros si es necesario, pero preferimos U/F)
+            pool_outs = packable[(packable['Category'].isin(['Campera', 'Buzo'])) & (packable['Occasion'].isin(['U', 'F', 'D']))]
+
+            # --- FILTROS DE CLIMA (Solo afectan a Calle y Deporte) ---
+            avg_max = st.session_state.get('travel_avg_max', 20) 
+
+            if forecast:
+                if avg_max > 25: # Calor
+                    # En calle: Sacar Jeans pesados o deportivos largos si se colaron
+                    pool_street = pool_street[~pool_street['Code'].apply(lambda x: 'DL' in x)] 
+                    # En deporte: Preferir cortos
+                    pool_sport = pool_sport[pool_sport['Code'].apply(lambda x: 'DC' in x or 'Sh' in x)]
+                    # Abrigos livianos
+                    pool_outs = pool_outs[pool_outs['Code'].apply(lambda x: '04' not in x and '05' not in x)] 
+                elif avg_max < 15: # Frío
+                    # En calle: Sacar Shorts
+                    pool_street = pool_street[~pool_street['Code'].apply(lambda x: 'Sh' in x or 'DC' in x)]
+                    # En deporte: Preferir largos
+                    pool_sport = pool_sport[~pool_sport['Code'].apply(lambda x: 'DC' in x)]
+                    # Sacar musculosas
+                    pool_street = pool_street[~pool_street['Code'].apply(lambda x: '00' in x)]
+
+            # --- SELECCIÓN (SAMPLING) ---
+            final_pack = []
+
+            # 1. SELECCIÓN CASA (Solo 1 Top y 1 Bottom)
+            try:
+                # Intenta buscar remera de casa
+                home_top = pool_home[pool_home['Category'].isin(['Remera', 'Camisa'])].sample(1)
+                final_pack.append(home_top)
+            except: st.warning("No tienes remeras 'Casa' limpias para dormir.")
+            
+            try:
+                # Intenta buscar pantalón de casa
+                home_bot = pool_home[pool_home['Category'] == 'Pantalón'].sample(1)
+                final_pack.append(home_bot)
+            except: st.warning("No tienes pantalones 'Casa' limpios para dormir.")
+
+            # 2. SELECCIÓN DEPORTE (Estrictamente D)
+            if req_sport_tops > 0:
+                avail_s_tops = pool_sport[pool_sport['Category'].isin(['Remera'])]
+                avail_s_bots = pool_sport[pool_sport['Category'] == 'Pantalón']
+                
+                if len(avail_s_tops) < req_sport_tops: st.warning(f"Te faltan {req_sport_tops - len(avail_s_tops)} tops deportivos limpios.")
+                if len(avail_s_bots) < req_sport_bots: st.warning(f"Te faltan {req_sport_bots - len(avail_s_bots)} pantalones deportivos limpios.")
+                
+                final_pack.append(avail_s_tops.sample(min(len(avail_s_tops), req_sport_tops)))
+                final_pack.append(avail_s_bots.sample(min(len(avail_s_bots), req_sport_bots)))
+
+            # 3. SELECCIÓN CALLE (Estrictamente U o F)
+            avail_u_tops = pool_street[pool_street['Category'].isin(['Remera', 'Camisa'])]
+            avail_u_bots = pool_street[pool_street['Category'] == 'Pantalón']
+            
+            # Rellenar tops de calle
+            cnt_tops = min(len(avail_u_tops), req_daily_tops)
+            final_pack.append(avail_u_tops.sample(cnt_tops))
+            
+            # Rellenar bottoms de calle
+            cnt_bots = min(len(avail_u_bots), req_daily_bots)
+            final_pack.append(avail_u_bots.sample(cnt_bots))
+
+            # 4. ABRIGO (2 piezas random compatibles)
+            final_pack.append(pool_outs.sample(min(len(pool_outs), 2)))
+
+            # CONSOLIDAR
+            if final_pack:
+                st.session_state['travel_pack'] = pd.concat(final_pack).drop_duplicates()
+                st.session_state['travel_selections'] = {} 
+                st.rerun()
+            else:
+                st.error("No se pudo generar la valija (falta stock limpio).")
+
+    if st.session_state.get('travel_pack') is not None:
+        pack = st.session_state['travel_pack']
+        
+        st.divider()
+        st.subheader(f"🧳 Tu Valija ({len(pack)} prendas)")
+        
+        # Agrupación visual para confirmar que la lógica funciona
+        st.caption("Distribución automática:")
+        c_stats1, c_stats2, c_stats3 = st.columns(3)
+        c_stats1.info(f"🏠 Casa (Dormir): {len(pack[pack['Occasion'] == 'C'])}")
+        c_stats2.warning(f"🏋️ Deporte: {len(pack[pack['Occasion'] == 'D'])}")
+        c_stats3.success(f"🎓 Universidad/Formal: {len(pack[pack['Occasion'].isin(['U', 'F'])] )}")
+
+        cols = st.columns(3)
+        for i, (index, row) in enumerate(pack.iterrows()):
+            with cols[i % 3]:
+                with st.container(border=True):
+                    # Etiqueta de ocasión para verificar visualmente
+                    emoji_occ = "🏠" if row['Occasion'] == 'C' else "🏋️" if row['Occasion'] == 'D' else "🎓" if row['Occasion'] == 'U' else "👔"
+                    
+                    img = cargar_imagen_desde_url(row['ImageURL'])
+                    if img: st.image(img, use_container_width=True)
+                    else: st.write("📷 Sin foto")
+                    st.markdown(f"**{emoji_occ} {row['Category']}**")
+                    st.caption(f"Code: `{row['Code']}`")
+                    
+                    c_ida, c_vuelta = st.columns(2)
+                    is_ida = c_ida.checkbox("Ida", key=f"ida_{row['Code']}")
+                    is_vuelta = c_vuelta.checkbox("Vuel", key=f"vuelta_{row['Code']}")
+                    if 'travel_selections' not in st.session_state: st.session_state['travel_selections'] = {}
+                    st.session_state['travel_selections'][row['Code']] = {'ida': is_ida, 'vuelta': is_vuelta}
+
+        st.divider()
+        sel = st.session_state.get('travel_selections', {})
+        ida_items = [code for code, vals in sel.items() if vals.get('ida')]
+        vuelta_items = [code for code, vals in sel.items() if vals.get('vuelta')]
+        c1, c2 = st.columns(2)
+        c1.info(f"🛫 **Ida:** {', '.join(ida_items) if ida_items else '---'}")
+        c2.success(f"🛬 **Vuelta:** {', '.join(vuelta_items) if vuelta_items else '---'}")
+        st.divider()
+        if st.button("🗑️ Borrar Valija y Empezar de Nuevo", type="secondary", use_container_width=True):
+            st.session_state['travel_pack'] = None; st.session_state['travel_selections'] = {}; st.rerun()
+
+    st.divider()
+    with st.expander("📋 Checklist de Supervivencia", expanded=False):
+        essentials = ["DNI / Pasaporte", "Cargador", "Cepillo Dientes", "Desodorante", "Auriculares", "Medicamentos", "Lentes", "Billetera"]
+        cols_ch = st.columns(2)
+        for i, item in enumerate(essentials): cols_ch[i % 2].checkbox(item, key=f"check_{i}")
     
     st.divider()
     if st.button("🎒 Generar Propuesta de Valija", type="primary", use_container_width=True):
