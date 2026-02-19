@@ -213,7 +213,29 @@ def load_data_gsheet():
         sheet = client.open("GDI_Database").worksheet("inventory")
         data = sheet.get_all_records()
         if not data: return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
-        return pd.DataFrame(data).astype(str)
+        
+        df = pd.DataFrame(data).astype(str)
+        
+        # --- NUEVO: AUTO-LIMPIEZA DE 5 HORAS ---
+        changed = False
+        now = datetime.now()
+        for idx, row in df.iterrows():
+            if row.get('Status') == 'Lavando' and row.get('LaundryStart') not in ['', 'nan', 'None']:
+                try:
+                    start_time = datetime.fromisoformat(row['LaundryStart'])
+                    # Cambiado de 24 a 5 horas
+                    if now - start_time >= timedelta(hours=5):
+                        df.at[idx, 'Status'] = 'Limpio'
+                        df.at[idx, 'LaundryStart'] = ''
+                        df.at[idx, 'Uses'] = '0' # Aseguramos que los usos vuelvan a 0
+                        changed = True
+                except: pass
+        
+        if changed:
+            save_data_gsheet(df) # Guarda automáticamente si liberó prendas
+        # ---------------------------------------
+        
+        return df
     except: return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
 
 def save_data_gsheet(df):
@@ -1803,51 +1825,45 @@ def tarea_lavanderia():
 # ==========================================
 # --- THREAD DE CONTROL BLINDADO (SINGLETON) ---
 # ==========================================
-def run_scheduler_and_bot():
-    """Ejecuta el scheduler y el polling del bot simultáneamente"""
-    print("🚀 Hilo del Bot Arrancando...")
-    
-    # 1. Rutina Diaria (Outfit) - 07:00 AM AR (10:00 UTC)
-    schedule.every().day.at("10:00").do(tarea_manana)
-    
-    # 2. Rutina Nocturna (Check) - 22:00 PM AR (01:00 UTC)
-    schedule.every().day.at("01:00").do(tarea_noche)
-    
-    # 3. Rutina Lavandería (Viernes 18hs y Domingo 11hs AR aprox)
+# ==========================================
+# --- THREAD DE CONTROL BLINDADO (SINGLETON) ---
+# ==========================================
+def run_scheduler():
+    """Ejecuta solo el scheduler en un loop limpio y separado"""
+    schedule.every().day.at("10:00").do(tarea_manana) # 07:00 AM AR
+    schedule.every().day.at("01:00").do(tarea_noche)  # 22:00 PM AR
     schedule.every().friday.at("21:00").do(tarea_lavanderia) # 18:00 AR
     schedule.every().sunday.at("14:00").do(tarea_lavanderia) # 11:00 AR
     
-    # Loop híbrido
     while True:
         try:
-            # Ejecutar tareas pendientes
             schedule.run_pending()
-            
-            # Polling con timeout corto para no bloquear el scheduler
-            # Esto permite que el loop gire y revise la hora cada 10 segundos
-            bot.polling(none_stop=True, interval=0, timeout=10)
-            
+            time.sleep(30) # Chequea cada medio minuto, sin bloquear
         except Exception as e:
-            print(f"⚠️ Error en loop principal: {e}")
-            time.sleep(5)
+            print(f"⚠️ Error en scheduler: {e}")
+            time.sleep(30)
 
-# --- INICIO SEGURO (EVITA DUPLICADOS) ---
 def iniciar_bot_singleton():
-    # 1. Listar todos los hilos corriendo actualmente
     hilos_activos = [t.name for t in threading.enumerate()]
     
-    # 2. Nombre único para nuestro bot
-    NOMBRE_HILO = "Bot_GDI_Mendoza_v1"
-    
-    # 3. Verificar si ya existe
-    if NOMBRE_HILO in hilos_activos:
-        print("✋ El Bot ya está activo en segundo plano. No se inicia uno nuevo.")
-        return # Salimos sin hacer nada
-
-    # 4. Si no existe, lo creamos
-    t = threading.Thread(target=run_scheduler_and_bot, name=NOMBRE_HILO, daemon=True)
-    t.start()
-    print("✅ Bot iniciado correctamente (Instancia Única).")
+    # 1. Hilo exclusivo para Tareas Programadas
+    if "Scheduler_GDI" not in hilos_activos:
+        t_sched = threading.Thread(target=run_scheduler, name="Scheduler_GDI", daemon=True)
+        t_sched.start()
+        
+    # 2. Hilo exclusivo para el Bot de Telegram
+    if "Bot_Polling_GDI" not in hilos_activos:
+        def run_polling():
+            while True:
+                try:
+                    bot.polling(none_stop=True, interval=0, timeout=20)
+                except Exception as e:
+                    print(f"Error polling: {e}")
+                    time.sleep(15) # Espera antes de reconectar para evitar spam de errores si se corta internet
+                    
+        t_poll = threading.Thread(target=run_polling, name="Bot_Polling_GDI", daemon=True)
+        t_poll.start()
+        print("✅ Bot y Scheduler iniciados correctamente (Instancias Únicas).")
 
 # Ejecutar el inicio seguro
 if __name__ == "__main__":
