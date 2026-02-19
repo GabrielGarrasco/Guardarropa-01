@@ -1800,8 +1800,12 @@ def tarea_lavanderia():
     except Exception as e:
         print(f"Error lavanderia: {e}")
 # --- THREAD DE CONTROL ---
+# ==========================================
+# --- THREAD DE CONTROL BLINDADO (SINGLETON) ---
+# ==========================================
 def run_scheduler_and_bot():
     """Ejecuta el scheduler y el polling del bot simultáneamente"""
+    print("🚀 Hilo del Bot Arrancando...")
     
     # 1. Rutina Diaria (Outfit) - 07:00 AM AR (10:00 UTC)
     schedule.every().day.at("10:00").do(tarea_manana)
@@ -1809,31 +1813,42 @@ def run_scheduler_and_bot():
     # 2. Rutina Nocturna (Check) - 22:00 PM AR (01:00 UTC)
     schedule.every().day.at("01:00").do(tarea_noche)
     
-    # 3. Rutina Lavandería (Viernes y Domingos a la tarde)
-    # Viernes 18:00 AR (21:00 UTC) - Para tener ropa el finde
-    schedule.every().friday.at("21:00").do(tarea_lavanderia)
-    # Domingo 11:00 AR (14:00 UTC) - Para la semana
-    schedule.every().sunday.at("14:00").do(tarea_lavanderia)
+    # 3. Rutina Lavandería (Viernes 18hs y Domingo 11hs AR aprox)
+    schedule.every().friday.at("21:00").do(tarea_lavanderia) # 18:00 AR
+    schedule.every().sunday.at("14:00").do(tarea_lavanderia) # 11:00 AR
     
     # Loop híbrido
     while True:
         try:
+            # Ejecutar tareas pendientes
             schedule.run_pending()
-            bot.polling(none_stop=True, interval=0, timeout=20)
+            
+            # Polling con timeout corto para no bloquear el scheduler
+            # Esto permite que el loop gire y revise la hora cada 10 segundos
+            bot.polling(none_stop=True, interval=0, timeout=10)
+            
         except Exception as e:
+            print(f"⚠️ Error en loop principal: {e}")
             time.sleep(5)
 
-# Arrancar en segundo plano (Solo una vez)
-if 'bot_active' not in st.session_state:
-    st.session_state['bot_active'] = True
-    t = threading.Thread(target=run_scheduler_and_bot, daemon=True)
+# --- INICIO SEGURO (EVITA DUPLICADOS) ---
+def iniciar_bot_singleton():
+    # 1. Listar todos los hilos corriendo actualmente
+    hilos_activos = [t.name for t in threading.enumerate()]
+    
+    # 2. Nombre único para nuestro bot
+    NOMBRE_HILO = "Bot_GDI_Mendoza_v1"
+    
+    # 3. Verificar si ya existe
+    if NOMBRE_HILO in hilos_activos:
+        print("✋ El Bot ya está activo en segundo plano. No se inicia uno nuevo.")
+        return # Salimos sin hacer nada
+
+    # 4. Si no existe, lo creamos
+    t = threading.Thread(target=run_scheduler_and_bot, name=NOMBRE_HILO, daemon=True)
     t.start()
-    st.toast("🤖 Bot de Telegram Interactivo Iniciado")
-# --- DEBUGGING: BOTÓN PARA FORZAR EL MENSAJE AHORA ---
-st.sidebar.divider()
-if st.sidebar.button("🧪 TESTEAR FLUJO 7 AM"):
-    tarea_manana()  # Esto simula que son las 7 de la mañana
-    st.toast("🔔 ¡Revisá tu Telegram ahora!")
-if st.sidebar.button("🧺 TEST LAVANDERIA"):
-    tarea_lavanderia()
-    st.toast("Revisando canasto...")
+    print("✅ Bot iniciado correctamente (Instancia Única).")
+
+# Ejecutar el inicio seguro
+if __name__ == "__main__":
+    iniciar_bot_singleton()
