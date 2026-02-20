@@ -276,23 +276,49 @@ def load_travel_gsheet():
         return {}
     except: return {}
 
+def load_travel_gsheet():
+    client = get_google_sheet_client()
+    if not client: return {}
+    try:
+        sheet = client.open("GDI_Database").worksheet("travel")
+        data = sheet.get_all_records()
+        if data and 'state_json' in data[0]:
+            state = json.loads(data[0]['state_json'])
+            if 'travel_pack' in state and state['travel_pack']:
+                state['travel_pack'] = pd.DataFrame(state['travel_pack'])
+            return state
+        return {}
+    except: return {}
+
 def save_travel_gsheet(state_dict):
     client = get_google_sheet_client()
     if not client: return
     try:
         sheet = client.open("GDI_Database").worksheet("travel")
+        
+        # 1. Aseguramos que las selecciones sean booleanos puros
+        safe_selections = {}
+        if 'travel_selections' in state_dict and state_dict['travel_selections']:
+            for k, v in state_dict['travel_selections'].items():
+                safe_selections[str(k)] = {'ida': bool(v.get('ida', False)), 'vuelta': bool(v.get('vuelta', False))}
+
         state_copy = {
-            'active_trip': state_dict.get('active_trip', False),
-            'trip_current_day': state_dict.get('trip_current_day', 0),
-            'travel_selections': state_dict.get('travel_selections', {})
+            'active_trip': bool(state_dict.get('active_trip', False)),
+            'trip_current_day': int(state_dict.get('trip_current_day', 0)),
+            'travel_selections': safe_selections
         }
+        
+        # 2. CLAVE: Convertimos el DataFrame entero a string para matar los int64 y NaNs de Pandas
         if 'travel_pack' in state_dict and isinstance(state_dict.get('travel_pack'), pd.DataFrame):
-            state_copy['travel_pack'] = state_dict['travel_pack'].to_dict(orient='records')
+            df_safe = state_dict['travel_pack'].fillna('').astype(str)
+            state_copy['travel_pack'] = df_safe.to_dict(orient='records')
         
         sheet.clear()
-        sheet.update(values=[["state_json"], [json.dumps(state_copy)]], range_name="A1")
+        json_str = json.dumps(state_copy)
+        sheet.update(values=[["state_json"], [json_str]], range_name="A1")
+        
     except Exception as e:
-        st.error(f"Error guardando viaje en la nube: {e}")
+        st.error(f"Error técnico guardando en Sheets: {e}")
 
 # --- CONSTANTES ---
 LIMITES_USO = {"R": 2, "Sh": 2, "DC": 2, "Je": 4, "B": 4, "CS": 1, "Ve": 2, "DL": 2, "C": 5}
