@@ -16,7 +16,10 @@ from sklearn.preprocessing import LabelEncoder
 import calendar
 import altair as alt
 import colorsys
-import telebot # <--- IMPORTANTE: Importamos la librería aquí
+import telebot
+import schedule
+import time
+import threading
 
 # --- CONFIGURACIÓN ---
 st.set_page_config(page_title="GDI: Mendoza Ops v21.0", layout="centered", page_icon="🧥")
@@ -25,38 +28,26 @@ st.set_page_config(page_title="GDI: Mendoza Ops v21.0", layout="centered", page_
 # --- CONFIGURACIÓN DE SECRETOS Y BOT ---
 # ==========================================
 try:
-    # 1. Recuperar credenciales
     TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
     TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
-    
-    # 2. INICIALIZAR EL BOT AQUÍ (GLOBALMENTE)
-    # Esto hace que 'bot' exista para todo el resto del código
     bot = telebot.TeleBot(TELEGRAM_TOKEN) 
-    
 except Exception as e:
     st.error(f"Error cargando secretos o iniciando Bot: {e}")
-    # Definimos bot como None para que no rompa el resto si fallan los secretos
     bot = None 
 
 # ==========================================
-# --- MOTOR DE INTELIGENCIA ARTIFICIAL V3.0 (NEURAL STYLE) ---
-# ==========================================
-# (Aquí sigue tu clase OutfitAI tal cual la tenías...)
-# ==========================================
-# --- MOTOR DE INTELIGENCIA ARTIFICIAL V3.0 (NEURAL STYLE) ---
+# --- MOTOR DE INTELIGENCIA ARTIFICIAL V3.0 ---
 # ==========================================
 class OutfitAI:
     def __init__(self):
         self.model = None
-        self.encoders = {} # Diccionario para guardar encoders de cada columna
+        self.encoders = {}
         self.is_trained = False
-        self.co_occurrence_matrix = {} # Memoria de pares exitosos
+        self.co_occurrence_matrix = {}
 
     def _extract_features(self, temp, occasion, code, wind=0, humidity=50, date_obj=None):
-        """Desglosa el código SNA en features individuales para la IA (Contexto expandido)"""
         sna = decodificar_sna(code)
         
-        # Calcular día de la semana (0=Lunes, 6=Domingo)
         weekday = 0
         if date_obj:
             try: weekday = date_obj.weekday()
@@ -65,50 +56,42 @@ class OutfitAI:
             weekday = datetime.now().weekday()
 
         if not sna:
-            # Fallback si el código no es estándar
             return {'Temp': temp, 'Occasion': occasion, 'Season': 'X', 'Attr': '00', 'Color': '99', 'Wind': wind, 'Hum': humidity, 'Day': weekday}
         
         return {
             'Temp': float(temp),
             'Occasion': str(occasion),
-            'Season': sna['season'],   # Ej: W, V
-            'Attr': sna['attr'],       # Ej: Je, 04, Sh
-            'Color': sna['color'],     # Ej: 02, 10
-            'Wind': float(wind),       # Nuevo: Viento
-            'Hum': float(humidity),    # Nuevo: Humedad
-            'Day': int(weekday)        # Nuevo: Día de la semana
+            'Season': sna['season'],
+            'Attr': sna['attr'],
+            'Color': sna['color'],
+            'Wind': float(wind),
+            'Hum': float(humidity),
+            'Day': int(weekday)
         }
 
     def train(self, feedback_df, inventory_df):
         if feedback_df.empty or len(feedback_df) < 5: return False 
         try:
             data = feedback_df.copy()
-            # Limpieza de datos
             data['Temp_Real'] = pd.to_numeric(data['Temp_Real'], errors='coerce').fillna(20)
             
-            # --- TARGET PONDERADO ---
-            # Si hace mucho frío o calor, el abrigo importa más.
             def calculate_weighted_score(row):
                 if row['Action'] == 'Rejected': return 0
-                
                 r_abr = float(row.get('Rating_Abrigo', 4))
                 r_com = float(row.get('Rating_Comodidad', 3))
                 r_seg = float(row.get('Rating_Seguridad', 3))
                 temp = float(row.get('Temp_Real', 20))
                 
-                # Pesos dinámicos
                 w_abr = 2.0 if (temp < 15 or temp > 30) else 1.0
                 w_seg = 1.5 if row['Occasion'] in ['F', 'U'] else 1.0
                 w_com = 1.0
                 
                 total_w = w_abr + w_seg + w_com
                 weighted_avg = ((r_abr * w_abr) + (r_seg * w_seg) + (r_com * w_com)) / total_w
-                return (weighted_avg / 7) * 100 # Normalizado a 100
+                return (weighted_avg / 7) * 100
 
             data['Target_Score'] = data.apply(calculate_weighted_score, axis=1)
 
-            # --- MATRIZ DE CO-OCURRENCIA ---
-            # Guardamos pares Top+Bot que tuvieron score alto (>70)
             self.co_occurrence_matrix = {}
             high_rated = data[data['Target_Score'] > 70]
             for _, row in high_rated.iterrows():
@@ -116,14 +99,11 @@ class OutfitAI:
                     pair_key = f"{row['Top']}_{row['Bottom']}"
                     self.co_occurrence_matrix[pair_key] = self.co_occurrence_matrix.get(pair_key, 0) + 1
 
-            # Preparar Dataset para ML (Feature Engineering)
             training_rows = []
             for _, row in data.iterrows():
-                # Entrenamos por cada prenda individualmente para aprender sus propiedades
                 for part in ['Top', 'Bottom', 'Outer']:
                     code = row[part]
                     if code and code not in ['N/A', 'nan', 'None', '']:
-                        # Extraemos features con defaults si no existen las columnas nuevas en el histórico viejo
                         w = row.get('Wind', 0)
                         h = row.get('Humidity', 50)
                         try: d_obj = datetime.strptime(str(row['Date']), "%Y-%m-%d %H:%M")
@@ -136,58 +116,48 @@ class OutfitAI:
             df_train = pd.DataFrame(training_rows)
             if df_train.empty: return False
 
-            # Encoding de variables categóricas
             cat_cols = ['Occasion', 'Season', 'Attr', 'Color']
             X = df_train[['Temp', 'Wind', 'Hum', 'Day'] + cat_cols].copy()
             y = df_train['Score']
 
             for col in cat_cols:
                 le = LabelEncoder()
-                # Truco: Ajustamos con los valores presentes Y 'Unknown' para robustez
                 le.fit(list(X[col].unique()) + ['Unknown'])
                 self.encoders[col] = le
                 X[col] = le.transform(X[col])
 
-            # Modelo: Random Forest con más árboles y límite de profundidad para generalizar mejor
             self.model = RandomForestRegressor(n_estimators=200, max_depth=10, random_state=42)
             self.model.fit(X, y)
             self.is_trained = True
             return True
         except Exception as e:
-            # print(f"Error training: {e}") # Debug off
             return False
 
     def predict_score(self, item_row, current_temp, occasion_code, partner_code=None, wind=0, humidity=50):
         if not self.is_trained: return 50.0 
         try:
-            # 1. Predicción Base (ML)
             features = self._extract_features(current_temp, occasion_code, item_row['Code'], wind, humidity)
             
-            # Vector de entrada para el modelo
             input_vector = [features['Temp'], features['Wind'], features['Hum'], features['Day']]
             for col in ['Occasion', 'Season', 'Attr', 'Color']:
                 val = features[col]
-                # Manejo de valores nuevos no vistos en entrenamiento
                 if col in self.encoders:
                     if val not in self.encoders[col].classes_: val = 'Unknown'
                     input_vector.append(self.encoders[col].transform([val])[0])
                 else:
-                      input_vector.append(0) # Fallback
+                    input_vector.append(0)
             
             input_np = np.array([input_vector])
             predicted_score = self.model.predict(input_np)[0]
 
-            # 2. Penalización por Desgaste (Lógica original mantenida)
             uses = int(float(item_row['Uses'])) if item_row['Uses'] not in ['', 'nan'] else 0
             if uses > 2: predicted_score -= 15 
 
-            # 3. Bonus por Co-ocurrencia (La IA recuerda si esta combinación fue un éxito)
             if partner_code:
-                # Chequeamos ambos órdenes por las dudas
                 pair_1 = f"{item_row['Code']}_{partner_code}"
                 pair_2 = f"{partner_code}_{item_row['Code']}"
                 if pair_1 in self.co_occurrence_matrix or pair_2 in self.co_occurrence_matrix:
-                    predicted_score += 10 # Boost por combinación probada
+                    predicted_score += 10
 
             return predicted_score
         except: return 50.0
@@ -216,25 +186,23 @@ def load_data_gsheet():
         
         df = pd.DataFrame(data).astype(str)
         
-        # --- NUEVO: AUTO-LIMPIEZA DE 5 HORAS ---
+        # --- AUTO-LIMPIEZA DE 5 HORAS ---
         changed = False
         now = datetime.now()
         for idx, row in df.iterrows():
             if row.get('Status') == 'Lavando' and row.get('LaundryStart') not in ['', 'nan', 'None']:
                 try:
                     start_time = datetime.fromisoformat(row['LaundryStart'])
-                    # Cambiado de 24 a 5 horas
                     if now - start_time >= timedelta(hours=5):
                         df.at[idx, 'Status'] = 'Limpio'
                         df.at[idx, 'LaundryStart'] = ''
-                        df.at[idx, 'Uses'] = '0' # Aseguramos que los usos vuelvan a 0
+                        df.at[idx, 'Uses'] = '0'
                         changed = True
                 except: pass
         
         if changed:
-            save_data_gsheet(df) # Guarda automáticamente si liberó prendas
-        # ---------------------------------------
-        
+            save_data_gsheet(df)
+            
         return df
     except: return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
 
@@ -270,21 +238,11 @@ def save_feedback_entry_gsheet(entry):
 # --- CONSTANTES ---
 LIMITES_USO = {"R": 2, "Sh": 2, "DC": 2, "Je": 4, "B": 4, "CS": 1, "Ve": 2, "DL": 2, "C": 5}
 
-# --- MAPA DE COLORES PARA GRAFICOS ---
 COLOR_MAP = {
-    "01": "#F5F5F5", # Blanco
-    "02": "#1A1A1A", # Negro
-    "03": "#808080", # Gris
-    "04": "#0000CD", # Azul
-    "05": "#228B22", # Verde
-    "06": "#B22222", # Rojo
-    "07": "#FFD700", # Amarillo
-    "08": "#F5F5DC", # Beige
-    "09": "#8B4513", # Marron
-    "10": "#4682B4", # Denim
-    "11": "#FF8C00", # Naranja
-    "12": "#8A2BE2", # Violeta
-    "99": "#FF69B4"  # Estampado/Otro
+    "01": "#F5F5F5", "02": "#1A1A1A", "03": "#808080", "04": "#0000CD",
+    "05": "#228B22", "06": "#B22222", "07": "#FFD700", "08": "#F5F5DC",
+    "09": "#8B4513", "10": "#4682B4", "11": "#FF8C00", "12": "#8A2BE2",
+    "99": "#FF69B4" 
 }
 COLOR_NAMES = {
     "01": "Blanco", "02": "Negro", "03": "Gris", "04": "Azul", "05": "Verde",
@@ -321,6 +279,7 @@ def decodificar_sna(codigo):
     try:
         c = str(codigo).strip()
         if len(c) < 4: return None
+        if c.startswith('Ri'): return None # La ropa interior no tiene SNA tradicional
         season = c[0]
         if len(c) > 2 and c[1:3] == 'CS': 
             tipo = 'CS' 
@@ -342,13 +301,12 @@ def decodificar_sna(codigo):
     except: return None
 
 def get_limit_for_item(category, sna):
-    if category == 'Ropa interior': return 9999 # Sin límite de usos
+    if category == 'Ropa interior': return 9999
     if not sna: return 3
     if category == 'Pantalón': return LIMITES_USO.get(sna['attr'], 2)
     elif category in ['Remera', 'Camisa']: return LIMITES_USO.get(sna['tipo'], 1)
     return LIMITES_USO.get(sna['tipo'], 3)
 
-# --- NUEVO SISTEMA DE ARMONÍA CROMÁTICA (MATH BASED) ---
 def hex_to_rgb(hex_color):
     hex_color = hex_color.lstrip('#')
     return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
@@ -362,12 +320,11 @@ def calcular_armonia_color(hex1, hex2):
     diff_h = abs(h1 - h2) * 360
     if diff_h > 180: diff_h = 360 - diff_h
     
-    # Monocromático, Análogo, Complementario, Triada
     if diff_h < 15: return 1.2
     if 15 <= diff_h <= 45: return 1.1 
     if 160 <= diff_h <= 200: return 1.3 
     if 110 <= diff_h <= 130: return 1.1
-    if v1 < 0.2 and v2 < 0.2: return 0.8 # Evitar dos oscuros sucios
+    if v1 < 0.2 and v2 < 0.2: return 0.8
     return 1.0
 
 def check_harmony(code_top, code_bot):
@@ -384,10 +341,8 @@ def check_harmony(code_top, code_bot):
     factor = calcular_armonia_color(hex_t, hex_b)
     return factor >= 0.9
 
-# --- CLIMA LOCAL (Con Viento y Humedad) ---
 def get_weather_open_meteo():
     try:
-        # Se agregan wind_speed_10m y relative_humidity_2m
         url = "https://api.open-meteo.com/v1/forecast?latitude=-32.8908&longitude=-68.8272&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m&daily=temperature_2m_max,temperature_2m_min&hourly=temperature_2m&timezone=auto"
         res = requests.get(url).json()
         if 'current' not in res: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error API", "hourly_temp": [], "hourly_time": [], "wind": 0, "humidity": 50}
@@ -414,7 +369,6 @@ def get_weather_open_meteo():
         }
     except: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error Conexión", "hourly_temp": [], "hourly_time": [], "wind": 0, "humidity": 50, "weather_code": 0}
 
-# --- FUNCIONES VIAJE ---
 def get_city_coords(city_name):
     try:
         url = f"https://geocoding-api.open-meteo.com/v1/search?name={city_name}&count=1&language=es&format=json"
@@ -468,42 +422,27 @@ def create_outfit_canvas(top_code, bot_code, out_code, df_inv):
         return canvas
     except: return None
 
-# ==========================================
-# --- MODULO TELEGRAM INTEGRADO ---
-# ==========================================
-# --- FUNCIÓN PUENTE PARA EL BOTÓN MANUAL ---
 def enviar_foto_telegram(caption, image):
-    """Envía mensaje usando la instancia del bot definida al final"""
     try:
-        # Convertir imagen para enviar
         bio = BytesIO()
         image.save(bio, format='PNG')
         bio.seek(0)
-        
-        # Usamos la variable global 'bot' que se inicia al final del script
-        # Nota: Python la encontrará porque la función se ejecuta al hacer clic, 
-        # cuando ya todo el script cargó.
         bot.send_photo(TELEGRAM_CHAT_ID, photo=bio, caption=caption, parse_mode='Markdown')
-        return True, "Mensaje enviado con éxito (Telebot)"
+        return True, "Mensaje enviado con éxito"
     except Exception as e:
         return False, f"Error: {str(e)}"
+
 def enviar_briefing_diario():
-    """Genera el reporte completo y lo envía (Apto para Automatización)."""
     try:
-        # --- MODO AUTÓNOMO: Cargar datos si no hay sesión activa ---
-        # Si esto corre automático, st.session_state puede estar vacío o no ser accesible igual.
-        # Cargamos el inventario fresco directamente si no lo encontramos.
         if 'inventory' in st.session_state and not st.session_state['inventory'].empty:
             df_inv = st.session_state['inventory']
         else:
-            df_inv = load_data_gsheet() # Carga fresca desde la nube
+            df_inv = load_data_gsheet()
             
         if df_inv.empty: return False, "Error: No se pudo cargar el inventario."
 
-        # 1. Clima Base
         w_data = get_weather_open_meteo()
         
-        # 2. Probabilidad de Lluvia
         rain_warning = ""
         try:
             url_rain = "https://api.open-meteo.com/v1/forecast?latitude=-32.8908&longitude=-68.8272&hourly=precipitation_probability&timezone=auto&forecast_days=1"
@@ -519,7 +458,6 @@ def enviar_briefing_diario():
             else: rain_warning = "\n✅ Sin lluvias próximas."
         except: rain_warning = ""
 
-        # 3. Abrigo
         coat_schedule = ""
         hourly_temps = w_data.get('hourly_temp', [])
         hourly_times = w_data.get('hourly_time', [])
@@ -534,15 +472,12 @@ def enviar_briefing_diario():
         else:
             coat_schedule = "\n👕 Clima agradable."
 
-        # 4. Lavandería
         laundry_msg = ""
         dirty_count = len(df_inv[df_inv['Status'] == 'Sucio'])
         clean_shirts = len(df_inv[(df_inv['Category'].isin(['Remera', 'Camisa'])) & (df_inv['Status'] == 'Limpio')])
         if dirty_count > 5: laundry_msg += f"\n🧺 *LAVANDERÍA:* {dirty_count} prendas sucias acumuladas."
         if clean_shirts < 3: laundry_msg += f"\n⚠️ *URGENTE:* Solo quedan {clean_shirts} remeras limpias."
 
-        # 5. Canvas
-        # Si es automático, usamos 'U' (Universidad) por defecto
         occ_brief = 'U' 
         recs, _, _ = recommend_outfit(df_inv, w_data, occ_brief, random.randint(1, 10000))
         
@@ -555,7 +490,6 @@ def enviar_briefing_diario():
         canvas = create_outfit_canvas(r_top, r_bot, r_out, df_inv)
         if not canvas: return False, "Error generando imagen."
 
-        # 6. Enviar
         mensaje = (
             f"🚀 *GDI AUTO-BRIEFING*\n"
             f"📅 {datetime.now().strftime('%d/%m %H:%M')}\n\n"
@@ -569,42 +503,33 @@ def enviar_briefing_diario():
     except Exception as e:
         return False, f"Error loop: {str(e)}"
 
-# ==========================================
-# --- LÓGICA DE NEGOCIO (PHYSICS & ROTATION) ---
-# ==========================================
-
 def calculate_smart_score(item_row, current_temp, occasion, feedback_df, weather_data=None, partner_code=None):
-    # --- 1. BASE: Predicción ML o Promedio Histórico ---
     ai = st.session_state.get('outfit_ai')
     score = 50.0
     wind = weather_data.get('wind', 0) if weather_data else 0
     hum = weather_data.get('humidity', 50) if weather_data else 50
     
     if ai and ai.is_trained:
-        # Pasamos contexto expandido
         score = ai.predict_score(item_row, current_temp, occasion, partner_code, wind, hum)
     else:
-        # Fallback histórico
         item_code = item_row['Code']
         if not feedback_df.empty:
-            hist = feedback_df[feedback_df['Top'] == item_code] # Simplificado para velocidad
+            hist = feedback_df[feedback_df['Top'] == item_code]
             if not hist.empty:
                 try: score = (pd.to_numeric(hist['Rating_Seguridad'], errors='coerce').mean() / 5) * 100
                 except: pass
 
-    # --- 2. FACTOR "ROTACIÓN" (Para no repetir) ---
     try:
         if item_row['LastWorn'] not in ['', 'nan', 'None']:
             last_date = datetime.strptime(str(item_row['LastWorn']), "%Y-%m-%d").date()
             today = get_mendoza_time().date()
             days_diff = (today - last_date).days
             
-            if days_diff <= 2: score -= 40 # ¡No repetir lo de anteayer!
-            elif days_diff <= 5: score -= 15 # Dale un descanso
-            else: score += (days_diff * 0.5) # Bonus por "extrañar" la prenda
+            if days_diff <= 2: score -= 40
+            elif days_diff <= 5: score -= 15
+            else: score += (days_diff * 0.5)
     except: pass
 
-    # --- 3. FÍSICA AVANZADA (Termodinámica y Viento) ---
     if weather_data:
         is_sunny = weather_data.get('weather_code', 0) <= 3 
         sna = decodificar_sna(item_row['Code'])
@@ -613,28 +538,27 @@ def calculate_smart_score(item_row, current_temp, occasion, feedback_df, weather
             color_code = sna.get('color', '99')
             attr = sna.get('attr', '00')
             
-            # A. LEY DE ABSORCIÓN SOLAR
             is_dark = color_code in ['02', '04', '09', '12']
             if is_sunny:
-                if current_temp < 18 and is_dark: score += 10 # Sol + Negro en invierno = Bien
-                elif current_temp > 28 and is_dark: score -= 15 # Sol + Negro en verano = Mal
-                elif current_temp > 28 and not is_dark: score += 10 # Ropa clara en verano
+                if current_temp < 18 and is_dark: score += 10
+                elif current_temp > 28 and is_dark: score -= 15
+                elif current_temp > 28 and not is_dark: score += 10
 
-            # B. RESISTENCIA EÓLICA (Zonda)
             if wind > 20: 
                 if item_row['Category'] in ['Campera', 'Buzo']:
-                    if attr == '01': score += 20 # Rompevientos
-                    elif attr in ['03', '04']: score -= 10 # Lana pasa viento
+                    if attr == '01': score += 20
+                    elif attr in ['03', '04']: score -= 10
                 
                 if item_row['Category'] == 'Pantalón' and attr in ['Sh', 'DC']:
-                    score -= 20 # Piernas frías
+                    score -= 20
 
     return score
 
 def is_item_usable(row):
-    # Filtrar también los archivados para que no salgan en recomendaciones
     if 'Archived' in str(row['Status']): return False
     if row['Status'] != 'Limpio': return False
+    # Evitar que sugiera ropa interior
+    if row['Category'] == 'Ropa interior': return False 
     sna = decodificar_sna(row['Code'])
     if not sna: return True
     limit = get_limit_for_item(row['Category'], sna)
@@ -645,7 +569,6 @@ def is_item_usable(row):
     return True
 
 def is_needs_wash(row):
-    # Archivados no se lavan
     if 'Archived' in str(row['Status']): return False
     if row['Status'] in ['Sucio', 'Lavando']: return True
     sna = decodificar_sna(row['Code'])
@@ -680,7 +603,6 @@ def recommend_outfit(df, weather, occasion, seed):
             blacklist = set(rej['Top'].dropna().tolist() + rej['Bottom'].dropna().tolist() + rej['Outer'].dropna().tolist())
     except: pass
     
-    # Agregar Blacklist Temporal de sesión
     if 'temp_blacklist' in st.session_state:
         blacklist.update(st.session_state['temp_blacklist'])
 
@@ -696,7 +618,6 @@ def recommend_outfit(df, weather, occasion, seed):
     t_min = weather['min']
     t_feel = weather.get('feels_like', t_curr) + personal_offset 
     
-    # Datos de Viento/Humedad
     w_speed = weather.get('wind', 0)
     w_hum = weather.get('humidity', 50)
 
@@ -708,7 +629,6 @@ def recommend_outfit(df, weather, occasion, seed):
     hourly_times = weather.get('hourly_time', [])
     UMBRAL_FRIO = 18 
     
-    # Lógica de Abrigo y Avisos de Clima
     if hourly_temps and hourly_times:
         hours_cold = []
         now_date = get_mendoza_time().date()
@@ -725,7 +645,6 @@ def recommend_outfit(df, weather, occasion, seed):
             coat_msg = "☀️ No hace falta abrigo hoy."
             needs_coat = False
 
-    # --- ALERTA ZONDA ---
     if w_speed > 30 and w_hum < 30:
         coat_msg += " ⚠️ ALERTA ZONDA: Viento y tierra."
 
@@ -746,10 +665,8 @@ def recommend_outfit(df, weather, occasion, seed):
             if not sna: continue
             
             if selected_partner_code:
-                # Usamos la nueva función check_harmony que devuelve score, aqui lo simplificamos a bool
                 if not check_harmony(r['Code'], selected_partner_code):
-                    pass # En el nuevo modelo no filtramos rígido, dejamos pasar para que el score decida, salvo extremos.
-                         # Pero mantendremos el filtro para optimizar si es MUY malo.
+                    pass 
 
             match = False
             if category_type == 'bot':
@@ -779,22 +696,17 @@ def recommend_outfit(df, weather, occasion, seed):
         try:
             candidates_df = candidates_df.copy()
             
-            # 1. Calculamos el Score Base de la IA (Gustos + Clima + Física)
             candidates_df['AI_Score'] = candidates_df.apply(
                 lambda x: calculate_smart_score(x, t_curr, occasion, fb, weather, selected_partner_code), 
                 axis=1
             )
 
-            # --- ESTRATEGIA: CURIOSIDAD (EXPLORACIÓN VS EXPLOTACIÓN) ---
-            # 10% de las veces, la IA ignora la perfección y busca que uses ropa olvidada.
             exploration_mode = random.random() < 0.1 
 
             if exploration_mode:
-                # MODO CURIOSIDAD
                 candidates_df['Exploration_Boost'] = (10 - pd.to_numeric(candidates_df['Uses'], errors='coerce').fillna(0).clip(upper=10)) * 5
                 candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df['Exploration_Boost']
             else:
-                # MODO NORMAL (Harmonía Cromática)
                 candidates_df['Color_Harmony'] = 0
                 if selected_partner_code:
                       candidates_df['Color_Harmony'] = candidates_df.apply(
@@ -807,11 +719,11 @@ def recommend_outfit(df, weather, occasion, seed):
             return candidates_df.sort_values('Final_Score', ascending=False).iloc[0]
         except: return candidates_df.sample(1, random_state=seed).iloc[0]
 
-    bot = get_best(['Pantalón'], 'bot'); 
+    bot_item = get_best(['Pantalón'], 'bot'); 
     top = None
-    if bot is not None:
-        final.append(bot)
-        top = get_best(['Remera', 'Camisa'], 'top', selected_partner_code=bot['Code'])
+    if bot_item is not None:
+        final.append(bot_item)
+        top = get_best(['Remera', 'Camisa'], 'top', selected_partner_code=bot_item['Code'])
     else:
         top = get_best(['Remera', 'Camisa'], 'top')
     
@@ -823,6 +735,25 @@ def recommend_outfit(df, weather, occasion, seed):
         
     return pd.DataFrame(final), t_feel, coat_msg
 
+def calcular_peso_prenda(cat, code):
+    code_str = str(code)
+    if cat == 'Ropa interior':
+        if code_str.startswith('RiBr'): return 71
+        if code_str.startswith('RiB'): return 71
+        if code_str.startswith('RiM'): return 59 # Promedio medias
+        return 50
+    if cat == 'Pantalón':
+        if 'Je' in code_str: return 760
+        if 'Sh' in code_str or 'DC' in code_str: return 350
+        return 450
+    if cat in ['Remera', 'Camisa']:
+        if '02' in code_str: return 230
+        return 170
+    if cat in ['Buzo', 'Campera']:
+        if '04' in code_str or '05' in code_str: return 1000
+        return 500
+    return 300
+
 # ==========================================
 # --- INTERFAZ PRINCIPAL ---
 # ==========================================
@@ -833,7 +764,6 @@ user_city = st.sidebar.text_input("📍 Ciudad", value="Mendoza, AR")
 user_occ = st.sidebar.selectbox("🎯 Ocasión", ["U (Universidad)", "D (Deporte)", "C (Casa)", "F (Formal)"])
 code_occ = user_occ[0]
 
-# --- VENTANA SIDEBAR: TU LOOK DE HOY ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("###### 🧢 Hoy llevas puesto:")
 if 'inventory' not in st.session_state: 
@@ -883,7 +813,6 @@ try:
 except:
     st.sidebar.error("Error al cargar.")
 
-# --- INICIO VARIABLES SESSION ---
 if 'last_occ_viewed' not in st.session_state: st.session_state['last_occ_viewed'] = code_occ
 if st.session_state['last_occ_viewed'] != code_occ:
     st.session_state['custom_overrides'] = {}; st.session_state['last_occ_viewed'] = code_occ
@@ -896,14 +825,12 @@ if 'agenda_reserves' not in st.session_state: st.session_state['agenda_reserves'
 
 weather = get_weather_open_meteo()
 
-# --- TABS ---
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["✨ Sugerencia", "🧺 Lavadero", "📦 Inventario", "➕ Nuevo Item", "📊 Estadísticas", "✈️ Viaje", "📅 Agenda"])
 
 with tab1:
     today_str = get_mendoza_time().strftime("%Y-%m-%d")
     outfit_of_the_day = None
     
-    # Revisar Agenda de HOY
     reserved_today_codes = st.session_state['agenda_reserves'].get(get_mendoza_time().date(), [])
     
     if not st.session_state['change_mode']:
@@ -958,7 +885,6 @@ with tab1:
         col_w3.metric("Perfil", f"{temp_calculada:.1f}°C", f"{offset_val:+.1f}°C (Smart)")
         if coat_advice: st.markdown(f"**{coat_advice}**")
         
-        # --- BOTÓN TELEGRAM ---
         st.divider()
         if st.button("🚀 Enviar a Telegram", use_container_width=True):
             with st.spinner("Conectando con GDI HQ..."):
@@ -1033,15 +959,13 @@ with tab1:
 
         if st.session_state['change_mode']:
             st.info("¿Qué falló en esta propuesta?")
-            # NUEVO SISTEMA DE RECHAZO CON MOTIVOS
             with st.container(border=True):
                 reason = st.radio("Motivo del rechazo:", 
                         ["Hace frío/calor para esto", "No combinan los colores", "No tengo ganas de usar esa prenda", "Evento formal/informal"],
                         horizontal=True)
 
                 if st.button("🎲 Dame otra opción"):
-                    # Ajuste inteligente basado en la razón
-                    ra = 3 # Neutro
+                    ra = 3
                     if reason == "Hace frío/calor para esto": ra = 1 
                     
                     entry = {
@@ -1059,7 +983,6 @@ with tab1:
                     }
                     save_feedback_entry_gsheet(entry)
 
-                    # BLACKLIST TEMPORAL (Solo si es capricho)
                     if 'temp_blacklist' not in st.session_state: st.session_state['temp_blacklist'] = []
                     if reason == "No tengo ganas de usar esa prenda":
                         st.session_state['temp_blacklist'].extend([rec_top, rec_bot, rec_out])
@@ -1146,37 +1069,9 @@ with tab1:
                         curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
                         df.at[idx, 'Uses'] = curr + 1; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d"); save_data_gsheet(df); st.session_state['confirm_stage'] = 0; st.session_state['alerts_buffer'] = []; st.session_state['change_mode'] = False; st.rerun()
     else: st.error("No hay ropa limpia disponible (según filtros). ¡Lavá algo!")
-def calcular_peso_prenda(cat, code):
-    code_str = str(code)
-    if cat == 'Ropa interior':
-        if code_str.startswith('RiBr'): return 71 # Brief
-        if code_str.startswith('RiB'): return 71  # Boxer
-        if code_str.startswith('RiM'): return 59  # Medias (Promedio entre 35 y 83)
-        return 50
-    if cat == 'Pantalón':
-        if 'Je' in code_str: return 760 # Jeans
-        if 'Sh' in code_str or 'DC' in code_str: return 350 # Shorts
-        return 450 # Pantalón normal
-    if cat in ['Remera', 'Camisa']:
-        if '02' in code_str: return 230 # Manga larga
-        return 170 # Manga corta/musculosa
-    if cat in ['Buzo', 'Campera']:
-        if '04' in code_str or '05' in code_str: return 1000 # Muy gruesa
-        return 500 # Normal
-    return 300 # Default fallback
+
 with tab2: 
     st.header("Lavadero")
-    
-    # --- DICCIONARIO DE PESOS ESTIMADOS (EN GRAMOS) ---
-    PESOS_PRENDAS = {
-        "Pantalón": 600,
-        "Je": 650, "Gab": 600, "Jog": 500, "Sh": 300, # Variaciones si las hay
-        "Remera": 200,
-        "Camisa": 250,
-        "Buzo": 700,
-        "Campera": 800,
-        "Short": 250
-    }
     
     with st.expander("🧠 Smart Laundry (Carga Inteligente)", expanded=True):
         if not df.empty:
@@ -1198,34 +1093,54 @@ with tab2:
             except: pass
             
             st.caption(f"⚖️ Capacidad de lavado aprendida: **{learned_capacity/1000:.1f} kg**")
-            
-            # ... (Lógica de sugerencia de lavado original, no la tocamos) ...
+
             if dirty_pool.empty:
                 st.success("¡Nada que lavar!")
             else:
                 total_counts = df['Category'].value_counts()
                 clean_counts = clean_pool['Category'].value_counts()
+                
                 recs_smart = []
                 for _, row in dirty_pool.iterrows():
-                    c_cat, c_code = row['Category'], row['Code']
+                    c_cat = row['Category']
+                    c_code = row['Code']
                     c_weight = calcular_peso_prenda(c_cat, c_code)
+                    
                     scarcity = 1 - (clean_counts.get(c_cat, 0) / total_counts.get(c_cat, 1))
-                    recs_smart.append({'Code': c_code, 'Category': c_cat, 'Score': (scarcity * 100) + random.uniform(0, 5), 'Weight': c_weight})
+                    score_prio = (scarcity * 100) + random.uniform(0, 5)
+                    
+                    recs_smart.append({
+                        'Code': c_code, 
+                        'Category': c_cat, 
+                        'Score': score_prio,
+                        'Weight': c_weight
+                    })
                 
                 recs_sorted = sorted(recs_smart, key=lambda x: x['Score'], reverse=True)
-                curr_w, final_basket = 0, []
+                
+                curr_w = 0
+                final_basket = []
+                
                 for item in recs_sorted:
                     if curr_w + item['Weight'] <= (learned_capacity * 1.1):
-                        final_basket.append(item); curr_w += item['Weight']
+                        final_basket.append(item)
+                        curr_w += item['Weight']
                 
                 st.info(f"💡 Sugerencia para optimizar carga ({curr_w/1000:.2f}kg / {learned_capacity/1000:.1f}kg):")
+                
                 cols = st.columns(3)
-                for i, item in enumerate(final_basket): cols[i%3].write(f"• `{item['Code']}`")
-
+                for i, item in enumerate(final_basket):
+                    cols[i%3].write(f"• `{item['Code']}`")
+                
+                if len(final_basket) < len(dirty_pool):
+                    leftover = len(dirty_pool) - len(final_basket)
+                    st.caption(f"Quedan {leftover} prendas sucias de menor prioridad para el próximo lavado.")
+    
     st.divider()
     dirty_list = df[df.apply(is_needs_wash, axis=1)]
     st.subheader(f"🧺 Canasto de Ropa Sucia ({len(dirty_list)})")
     if not dirty_list.empty: st.dataframe(dirty_list[['Code', 'Category', 'Uses', 'Status']], use_container_width=True)
+    else: st.info("Todo impecable ✨")
     
     # --- NUEVA LÓGICA DE LAVADO POR LOTE ---
     if 'wash_batch' not in st.session_state: st.session_state['wash_batch'] = []
@@ -1251,7 +1166,7 @@ with tab2:
             
             col_b1, col_b2 = st.columns(2)
             if col_b1.button("🚀 Finalizar Lista (Lavar Lote)", type="primary", use_container_width=True):
-                exact_timestamp = datetime.now().isoformat() # MISMA HORA PARA TODO EL LOTE
+                exact_timestamp = datetime.now().isoformat()
                 for c_batch in st.session_state['wash_batch']:
                     idx = df[df['Code'] == c_batch].index[0]
                     df.at[idx, 'Status'] = 'Lavando'
@@ -1266,87 +1181,6 @@ with tab2:
             if col_b2.button("🗑️ Vaciar Lista", use_container_width=True):
                 st.session_state['wash_batch'] = []
                 st.rerun()
-
-    edited_laundry = st.data_editor(df[['Code', 'Category', 'Status', 'Uses']], key="ed_lav", column_config={"Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True)}, hide_index=True, disabled=["Code", "Category", "Uses"], use_container_width=True)
-    if st.button("🔄 Actualizar Planilla"):
-        df.update(edited_laundry)
-        st.session_state['inventory'] = df; save_data_gsheet(df); st.success("Actualizado")
-            
-            st.caption(f"⚖️ Capacidad de lavado aprendida: **{learned_capacity/1000:.1f} kg**")
-
-            if dirty_pool.empty:
-                st.success("¡Nada que lavar!")
-            else:
-                total_counts = df['Category'].value_counts()
-                clean_counts = clean_pool['Category'].value_counts()
-                
-                # 2. CALCULO DE ESCASEZ (PRIORIDAD)
-                recommendations = []
-                for _, row in dirty_pool.iterrows():
-                    cat = row['Category']
-                    code = row['Code']
-                    weight = PESOS_PRENDAS.get(cat, 300)
-                    
-                    total_c = total_counts.get(cat, 1)
-                    clean_c = clean_counts.get(cat, 0)
-                    
-                    # Escasez: Mientras menos limpia tenga, más urgente es lavar
-                    scarcity_ratio = 1 - (clean_c / total_c)
-                    priority_score = (scarcity_ratio * 100) + random.uniform(0, 5)
-                    
-                    recommendations.append({
-                        'Code': code, 
-                        'Category': cat, 
-                        'Score': priority_score,
-                        'Weight': weight
-                    })
-                
-                # 3. ARMADO DE LA CARGA ÓPTIMA (KNAPSACK PROBLEM SIMPLIFICADO)
-                # Ordenamos por prioridad (los más necesitados primero)
-                recs_sorted = sorted(recommendations, key=lambda x: x['Score'], reverse=True)
-                
-                current_load_weight = 0
-                final_basket = []
-                
-                for item in recs_sorted:
-                    if current_load_weight + item['Weight'] <= (learned_capacity * 1.1): # Margen del 10%
-                        final_basket.append(item)
-                        current_load_weight += item['Weight']
-                
-                # Visualización
-                st.info(f"💡 Sugerencia para optimizar carga ({current_load_weight/1000:.2f}kg / {learned_capacity/1000:.1f}kg):")
-                
-                cols = st.columns(3)
-                for i, item in enumerate(final_basket):
-                    cols[i%3].write(f"• `{item['Code']}` ({item['Category']})")
-                
-                if len(final_basket) < len(dirty_pool):
-                    leftover = len(dirty_pool) - len(final_basket)
-                    st.caption(f"Quedan {leftover} prendas sucias de menor prioridad para el próximo lavado.")
-    
-    st.divider()
-    dirty_list = df[df.apply(is_needs_wash, axis=1)]
-    st.subheader(f"🧺 Canasto de Ropa Sucia ({len(dirty_list)})")
-    if not dirty_list.empty: st.dataframe(dirty_list[['Code', 'Category', 'Uses', 'Status']], use_container_width=True)
-    else: st.info("Todo impecable ✨")
-    
-    with st.container(border=True):
-        col_input, col_btn = st.columns([3, 1])
-        with col_input:
-            with st.form("quick_wash_form", clear_on_submit=True):
-                code_input = st.text_input("Ingresar Código")
-                col_b1, col_b2 = st.columns(2)
-                with col_b1: btn_lavar = st.form_submit_button("🧼 Lavar", use_container_width=True)
-                with col_b2: btn_sucio = st.form_submit_button("🗑️ Sucio", use_container_width=True)
-                if code_input:
-                    code_clean = code_input.strip()
-                    if code_clean in df['Code'].astype(str).values:
-                        idx = df[df['Code'] == code_clean].index[0]
-                        if btn_lavar:
-                            df.at[idx, 'Status'] = 'Lavando'; df.at[idx, 'Uses'] = 0; df.at[idx, 'LaundryStart'] = datetime.now().isoformat(); st.session_state['inventory'] = df; save_data_gsheet(df); st.success(f"✅ {code_clean} lavando."); st.rerun()
-                        elif btn_sucio:
-                            df.at[idx, 'Status'] = 'Sucio'; st.session_state['inventory'] = df; save_data_gsheet(df); st.toast(f"🧺 {code_clean} marcada como sucia."); st.rerun()
-                    elif btn_lavar or btn_sucio: st.error("❌ Código no existe.")
     
     edited_laundry = st.data_editor(df[['Code', 'Category', 'Status', 'Uses']], key="ed_lav", column_config={"Status": st.column_config.SelectboxColumn("Estado", options=["Limpio", "Sucio", "Lavando"], required=True)}, hide_index=True, disabled=["Code", "Category", "Uses"], use_container_width=True)
     if st.button("🔄 Actualizar Planilla"):
@@ -1383,11 +1217,9 @@ with tab3:
                     st.error(f"Considera donar: {item['Code']}")
                     del st.session_state['lost_game_item']; st.rerun()
     
-    # Filtramos archivadas para la vista principal
     active_inv = df[~df['Status'].str.contains('Archived', na=False)]
     edited_inv = st.data_editor(active_inv, num_rows="dynamic", use_container_width=True, column_config={"Uses": st.column_config.ProgressColumn("Desgaste", min_value=0, max_value=10, format="%d"), "ImageURL": st.column_config.LinkColumn("Foto")})
     if st.button("💾 Guardar Inventario Completo"): 
-        # Actualizamos solo las filas activas en el DF original
         df.update(edited_inv)
         st.session_state['inventory'] = df; save_data_gsheet(df); st.toast("Guardado")
 
@@ -1447,7 +1279,6 @@ with tab4:
                 st.success(f"¡{code} subido a Google Sheets!")
                 
         else:
-            # LÓGICA NORMAL PARA EL RESTO DE LA ROPA
             c1, c2 = st.columns(2)
             with c1:
                 temp = st.selectbox("Temporada", ["V (Verano)", "W (Invierno)", "M (Media)", "T (Toda Estación)"]).split(" ")[0]
@@ -1457,7 +1288,16 @@ with tab4:
             with c2:
                 occ = st.selectbox("Ocasión", ["U", "D", "C", "F"])
                 url = st.text_input("URL Foto")
-                # Botón detectar color...
+                if url and st.button("👁️ Detectar Color"):
+                    try:
+                        img = cargar_imagen_desde_url(url)
+                        if img:
+                            hex_col = estimar_color_dominante(img)
+                            st.caption(f"Detectado: {hex_col}")
+                            st.color_picker("Tono Aproximado", hex_col, disabled=True)
+                        else: st.error("Link inválido")
+                    except: pass
+                
                 col = st.selectbox("Color", ["01-Blanco", "02-Negro", "03-Gris", "04-Azul", "05-Verde", "06-Rojo", "07-Amarillo", "08-Beige", "09-Marron", "10-Denim", "11-Naranja", "12-Violeta", "99-Estampado"])[:2]
         
             prefix = f"{temp}{t_code}{attr}{occ}{col}"
@@ -1469,6 +1309,7 @@ with tab4:
                 st.session_state['inventory'] = pd.concat([df, new], ignore_index=True)
                 save_data_gsheet(st.session_state['inventory'])
                 st.success(f"¡{code} subido a Google Sheets!")
+
 with tab5:
     st.header("📊 Estadísticas Avanzadas")
     if not df.empty:
@@ -1493,11 +1334,9 @@ with tab5:
         color_data = df['Color_Code'].value_counts().reset_index()
         color_data.columns = ['ColorCode', 'Count']
         
-        # Mapear códigos a Nombres y Hex
         color_data['ColorName'] = color_data['ColorCode'].map(COLOR_NAMES).fillna('Otro')
         color_data['Hex'] = color_data['ColorCode'].map(COLOR_MAP).fillna('#808080')
         
-        # Gráfico Altair con colores reales
         chart = alt.Chart(color_data).mark_bar().encode(
             x=alt.X('ColorName', sort='-y'),
             y='Count',
@@ -1697,20 +1536,13 @@ with tab7:
                     st.rerun()
     else:
         st.caption("No hay eventos futuros.")
-# ==========================================
-# ==========================================
-# --- NUEVO MÓDULO TELEGRAM INTERACTIVO (Telebot) ---
-# ==========================================
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-import schedule
-import time
-import threading
 
-# Inicializar Bot
+# ==========================================
+# --- MÓDULO TELEGRAM INTERACTIVO (Telebot) ---
+# ==========================================
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 def generar_teclado_ocasiones():
-    """Crea los botones para elegir la ocasión a las 7 AM"""
     markup = InlineKeyboardMarkup()
     markup.row_width = 2
     markup.add(
@@ -1722,7 +1554,6 @@ def generar_teclado_ocasiones():
     return markup
 
 def generar_teclado_acciones(occ_code):
-    """Crea los botones de Cambiar o Manual"""
     markup = InlineKeyboardMarkup()
     markup.add(
         InlineKeyboardButton("🔄 Cambiar", callback_data=f"reroll_{occ_code}"),
@@ -1730,60 +1561,47 @@ def generar_teclado_acciones(occ_code):
     )
     return markup
 
-# --- MANEJO DE CLICS EN BOTONES (CALLBACKS) ---
-@bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
-    # El usuario seleccionó una ocasión
-    if call.data.startswith("occ_"):
-        occ_code = call.data.split("_")[1]
-        bot.answer_callback_query(call.id, "Generando outfit...")
-        enviar_sugerencia_interactiva(occ_code, call.message.chat.id)
+if bot:
+    @bot.callback_query_handler(func=lambda call: True)
+    def callback_query(call):
+        if call.data.startswith("occ_"):
+            occ_code = call.data.split("_")[1]
+            bot.answer_callback_query(call.id, "Generando outfit...")
+            enviar_sugerencia_interactiva(occ_code, call.message.chat.id)
 
-    # El usuario quiere cambiar (Reroll)
-    elif call.data.startswith("reroll_"):
-        occ_code = call.data.split("_")[1]
-        bot.answer_callback_query(call.id, "Buscando otra opción...")
-        # Borrar mensaje anterior para no llenar el chat
-        try: bot.delete_message(call.message.chat.id, call.message.message_id)
-        except: pass
-        enviar_sugerencia_interactiva(occ_code, call.message.chat.id, force_new_seed=True)
+        elif call.data.startswith("reroll_"):
+            occ_code = call.data.split("_")[1]
+            bot.answer_callback_query(call.id, "Buscando otra opción...")
+            try: bot.delete_message(call.message.chat.id, call.message.message_id)
+            except: pass
+            enviar_sugerencia_interactiva(occ_code, call.message.chat.id, force_new_seed=True)
 
-    # El usuario elige manual
-    elif call.data == "manual_mode":
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "🛠️ Entendido. Abre la app para editar manualmente: https://gdi-mendoza-ops-v21.streamlit.app")
+        elif call.data == "manual_mode":
+            bot.answer_callback_query(call.id)
+            bot.send_message(call.message.chat.id, "🛠️ Entendido. Abre la app para editar manualmente: https://gdi-mendoza-ops-v21.streamlit.app")
 
 def enviar_sugerencia_interactiva(occ_code, chat_id, force_new_seed=False):
-    """Genera el outfit y manda la foto con botones"""
+    if not bot: return
     try:
-        # Cargar datos frescos (IMPORTANTE: Esto corre en un hilo aparte)
         df_inv = load_data_gsheet()
         if df_inv.empty:
             bot.send_message(chat_id, "⚠️ Error leyendo base de datos.")
             return
 
-        # Obtener clima actual
         w_data = get_weather_open_meteo()
-        
-        # Generar semilla aleatoria
         seed = random.randint(1, 10000) if force_new_seed else int(datetime.now().timestamp())
-        
-        # Generar recomendación
         recs, temp_calc, advice = recommend_outfit(df_inv, w_data, occ_code, seed)
         
         if recs.empty:
             bot.send_message(chat_id, "⚠️ No hay ropa limpia disponible para esta ocasión.")
             return
 
-        # Extraer códigos
         r_top = recs[recs['Category'].isin(['Remera', 'Camisa'])].iloc[0]['Code'] if not recs[recs['Category'].isin(['Remera', 'Camisa'])].empty else None
         r_bot = recs[recs['Category'] == 'Pantalón'].iloc[0]['Code'] if not recs[recs['Category'] == 'Pantalón'].empty else None
         r_out = recs[recs['Category'].isin(['Campera', 'Buzo'])].iloc[0]['Code'] if not recs[recs['Category'].isin(['Campera', 'Buzo'])].empty else None
 
-        # Crear Canvas
         canvas = create_outfit_canvas(r_top, r_bot, r_out, df_inv)
         
-        # Texto del mensaje
         caption = (
             f"🧥 *Propuesta para {occ_code}*\n"
             f"🌡️ Clima: {w_data['temp']}°C (ST {w_data['feels_like']}°C)\n"
@@ -1791,7 +1609,6 @@ def enviar_sugerencia_interactiva(occ_code, chat_id, force_new_seed=False):
             f"• Top: {r_top}\n• Bot: {r_bot}\n• Out: {r_out}"
         )
 
-        # Enviar foto con botones
         bio = BytesIO()
         canvas.save(bio, format='PNG')
         bio.seek(0)
@@ -1807,9 +1624,8 @@ def enviar_sugerencia_interactiva(occ_code, chat_id, force_new_seed=False):
     except Exception as e:
         bot.send_message(chat_id, f"Error generando: {str(e)}")
 
-# --- TAREAS PROGRAMADAS ---
 def tarea_manana():
-    """Manda la pregunta de las 7 AM"""
+    if not bot: return
     try:
         bot.send_message(
             TELEGRAM_CHAT_ID, 
@@ -1821,7 +1637,7 @@ def tarea_manana():
         print(f"Error tarea mañana: {e}")
 
 def tarea_noche():
-    """Manda el recordatorio de las 22 PM"""
+    if not bot: return
     try:
         msg = (
             "🌙 *Check de fin de día*\n"
@@ -1832,12 +1648,7 @@ def tarea_noche():
     except Exception as e:
         print(f"Error tarea noche: {e}")
 
-# ==========================================
-# --- MÓDULO SMART LAUNDRY BOT ---
-# ==========================================
-
 def crear_collage_lavanderia(codes, df_inv):
-    """Genera una imagen uniendo las fotos de las prendas seleccionadas"""
     try:
         imgs = []
         for c in codes:
@@ -1846,7 +1657,6 @@ def crear_collage_lavanderia(codes, df_inv):
                 url = row.iloc[0]['ImageURL']
                 pil_img = cargar_imagen_desde_url(url)
                 if pil_img: 
-                    # Redimensionar para uniformidad
                     base_width = 300
                     w_percent = (base_width / float(pil_img.size[0]))
                     h_size = int((float(pil_img.size[1]) * float(w_percent)))
@@ -1855,7 +1665,6 @@ def crear_collage_lavanderia(codes, df_inv):
         
         if not imgs: return None
 
-        # Crear lienzo vertical
         total_height = sum([i.size[1] for i in imgs])
         canvas = Image.new('RGB', (300, total_height), (255, 255, 255))
         
@@ -1868,17 +1677,15 @@ def crear_collage_lavanderia(codes, df_inv):
     except: return None
 
 def tarea_lavanderia():
-    """Chequea si hay mucha ropa sucia y manda alerta"""
+    if not bot: return
     try:
         df = load_data_gsheet()
         if df.empty: return
 
-        # 1. Filtrar ropa sucia
         dirty_pool = df[df['Status'].isin(['Sucio', 'Lavando'])]
         if len(dirty_pool) < 4: 
-            return # No molestar si hay poca ropa sucia
+            return 
 
-        # 2. Lógica Smart (Prioridad por Escasez)
         clean_pool = df[df['Status'] == 'Limpio']
         total_counts = df['Category'].value_counts()
         clean_counts = clean_pool['Category'].value_counts()
@@ -1888,14 +1695,12 @@ def tarea_lavanderia():
             cat = row['Category']
             tot = total_counts.get(cat, 1)
             cln = clean_counts.get(cat, 0)
-            scarcity = 1 - (cln / tot) # Más cerca de 1 = Más urgente
+            scarcity = 1 - (cln / tot)
             recs.append({'Code': row['Code'], 'Cat': cat, 'Score': scarcity})
         
-        # Ordenar por urgencia y tomar el Top 5
         top_urgente = sorted(recs, key=lambda x: x['Score'], reverse=True)[:5]
         codes_to_wash = [x['Code'] for x in top_urgente]
         
-        # 3. Generar Mensaje
         msg = (
             "🧺 *¡Hora de Lavar!*\n"
             f"Tienes {len(dirty_pool)} prendas sucias acumuladas.\n\n"
@@ -1906,7 +1711,6 @@ def tarea_lavanderia():
         
         msg += "\n_Entra a la app para marcar como 'Limpio'._"
 
-        # 4. Generar y Enviar Foto
         canvas = crear_collage_lavanderia(codes_to_wash, df)
         
         if canvas:
@@ -1919,15 +1723,11 @@ def tarea_lavanderia():
 
     except Exception as e:
         print(f"Error lavanderia: {e}")
-# --- THREAD DE CONTROL ---
-# ==========================================
-# --- THREAD DE CONTROL BLINDADO (SINGLETON) ---
-# ==========================================
+
 # ==========================================
 # --- THREAD DE CONTROL BLINDADO (SINGLETON) ---
 # ==========================================
 def run_scheduler():
-    """Ejecuta solo el scheduler en un loop limpio y separado"""
     schedule.every().day.at("10:00").do(tarea_manana) # 07:00 AM AR
     schedule.every().day.at("01:00").do(tarea_noche)  # 22:00 PM AR
     schedule.every().friday.at("21:00").do(tarea_lavanderia) # 18:00 AR
@@ -1936,33 +1736,31 @@ def run_scheduler():
     while True:
         try:
             schedule.run_pending()
-            time.sleep(30) # Chequea cada medio minuto, sin bloquear
+            time.sleep(30)
         except Exception as e:
             print(f"⚠️ Error en scheduler: {e}")
             time.sleep(30)
 
 def iniciar_bot_singleton():
-    hilos_activos = [t.name for t in threading.enumerate()]
-    
-    # 1. Hilo exclusivo para Tareas Programadas
-    if "Scheduler_GDI" not in hilos_activos:
-        t_sched = threading.Thread(target=run_scheduler, name="Scheduler_GDI", daemon=True)
-        t_sched.start()
+    if bot:
+        hilos_activos = [t.name for t in threading.enumerate()]
         
-    # 2. Hilo exclusivo para el Bot de Telegram
-    if "Bot_Polling_GDI" not in hilos_activos:
-        def run_polling():
-            while True:
-                try:
-                    bot.polling(none_stop=True, interval=0, timeout=20)
-                except Exception as e:
-                    print(f"Error polling: {e}")
-                    time.sleep(15) # Espera antes de reconectar para evitar spam de errores si se corta internet
-                    
-        t_poll = threading.Thread(target=run_polling, name="Bot_Polling_GDI", daemon=True)
-        t_poll.start()
-        print("✅ Bot y Scheduler iniciados correctamente (Instancias Únicas).")
+        if "Scheduler_GDI" not in hilos_activos:
+            t_sched = threading.Thread(target=run_scheduler, name="Scheduler_GDI", daemon=True)
+            t_sched.start()
+            
+        if "Bot_Polling_GDI" not in hilos_activos:
+            def run_polling():
+                while True:
+                    try:
+                        bot.polling(none_stop=True, interval=0, timeout=20)
+                    except Exception as e:
+                        print(f"Error polling: {e}")
+                        time.sleep(15)
+                        
+            t_poll = threading.Thread(target=run_polling, name="Bot_Polling_GDI", daemon=True)
+            t_poll.start()
+            print("✅ Bot y Scheduler iniciados correctamente (Instancias Únicas).")
 
-# Ejecutar el inicio seguro
 if __name__ == "__main__":
     iniciar_bot_singleton()
