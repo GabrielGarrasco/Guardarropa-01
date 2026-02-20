@@ -259,6 +259,41 @@ def save_feedback_entry_gsheet(entry):
         st.error(f"Error escribiendo en Feedback: {e}")
         st.stop()
 
+# ==========================================
+# --- NUEVO: CARGA Y GUARDADO DE MODO VIAJE ---
+# ==========================================
+def load_travel_gsheet():
+    client = get_google_sheet_client()
+    if not client: return {}
+    try:
+        sheet = client.open("GDI_Database").worksheet("travel")
+        data = sheet.get_all_records()
+        if data and 'state_json' in data[0]:
+            state = json.loads(data[0]['state_json'])
+            if 'travel_pack' in state and state['travel_pack']:
+                state['travel_pack'] = pd.DataFrame(state['travel_pack'])
+            return state
+        return {}
+    except: return {}
+
+def save_travel_gsheet(state_dict):
+    client = get_google_sheet_client()
+    if not client: return
+    try:
+        sheet = client.open("GDI_Database").worksheet("travel")
+        state_copy = {
+            'active_trip': state_dict.get('active_trip', False),
+            'trip_current_day': state_dict.get('trip_current_day', 0),
+            'travel_selections': state_dict.get('travel_selections', {})
+        }
+        if 'travel_pack' in state_dict and isinstance(state_dict.get('travel_pack'), pd.DataFrame):
+            state_copy['travel_pack'] = state_dict['travel_pack'].to_dict(orient='records')
+        
+        sheet.clear()
+        sheet.update(values=[["state_json"], [json.dumps(state_copy)]], range_name="A1")
+    except Exception as e:
+        st.error(f"Error guardando viaje en la nube: {e}")
+
 # --- CONSTANTES ---
 LIMITES_USO = {"R": 2, "Sh": 2, "DC": 2, "Je": 4, "B": 4, "CS": 1, "Ve": 2, "DL": 2, "C": 5}
 
@@ -776,6 +811,15 @@ def calcular_peso_prenda(cat, code):
         if '04' in code_str or '05' in code_str: return 1000
         return 500
     return 300
+
+# ==========================================
+# --- INICIALIZACIÓN Y ESTADOS ---
+# ==========================================
+if 'travel_loaded' not in st.session_state:
+    travel_data = load_travel_gsheet()
+    if travel_data:
+        st.session_state.update(travel_data)
+    st.session_state['travel_loaded'] = True
 
 # ==========================================
 # --- INTERFAZ PRINCIPAL ---
@@ -1555,6 +1599,12 @@ with tab6:
             st.divider()
             st.subheader(f"🧳 Tu Valija ({len(pack)} prendas)")
             
+            # --- NUEVO BOTÓN DE GUARDADO ---
+            if st.button("💾 Guardar Valija en la Nube", type="primary", use_container_width=True):
+                st.session_state['travel_pack'] = pack 
+                save_travel_gsheet(st.session_state)
+                st.success("¡Valija sincronizada! Ya podés abrir la app en el celular.")
+            
             # --- SUGERENCIA ROPA INTERIOR ---
             st.info(f"🩲 **Sugerencia de Ropa Interior:** Llevá **{num_days + 2} pares** (1 para cada día + 2 de repuesto).")
             
@@ -1623,12 +1673,15 @@ with tab6:
                 if st.session_state.get('travel_weather'):
                     st.session_state['active_trip'] = True
                     st.session_state['trip_current_day'] = 0
+                    save_travel_gsheet(st.session_state) # --- NUEVO GUARDADO ---
                     st.rerun()
                 else:
                     st.error("Analizá el clima del destino primero.")
                     
             if col_del.button("🗑️ Borrar Valija", type="secondary", use_container_width=True):
-                st.session_state['travel_pack'] = None; st.session_state['travel_selections'] = {}; st.rerun()
+                st.session_state['travel_pack'] = None; st.session_state['travel_selections'] = {}; st.session_state['active_trip'] = False
+                save_travel_gsheet(st.session_state) # --- NUEVO GUARDADO ---
+                st.rerun()
 
         st.divider()
         with st.expander("📋 Checklist de Supervivencia", expanded=False):
@@ -1689,16 +1742,19 @@ with tab6:
                 col_next, col_end = st.columns(2)
                 if col_next.button("⏭️ Avanzar de Día", use_container_width=True):
                     st.session_state['trip_current_day'] += 1
+                    save_travel_gsheet(st.session_state) # --- NUEVO GUARDADO ---
                     st.rerun()
                 if col_end.button("🛑 Terminar Viaje", type="secondary", use_container_width=True):
                     st.session_state['active_trip'] = False
                     st.session_state['travel_pack'] = None
+                    save_travel_gsheet(st.session_state) # --- NUEVO GUARDADO ---
                     st.rerun()
             else:
                 st.info("¡Fin del viaje programado!")
                 if st.button("🏠 Desarmar Valija y volver", type="primary", use_container_width=True):
                     st.session_state['active_trip'] = False
                     st.session_state['travel_pack'] = None
+                    save_travel_gsheet(st.session_state) # --- NUEVO GUARDADO ---
                     st.rerun()
         else:
             st.error("Datos del viaje perdidos. Volviendo a Planificación...")
