@@ -214,8 +214,13 @@ def save_data_gsheet(df):
         sheet.clear()
         df_str = df.astype(str)
         datos = [df_str.columns.values.tolist()] + df_str.values.tolist()
-        sheet.update(datos)
-    except: pass
+        # Compatibilidad dual para gspread viejo y nuevo
+        try:
+            sheet.update(values=datos, range_name="A1")
+        except TypeError:
+            sheet.update("A1", datos)
+    except Exception as e:
+        st.error(f"Error guardando inventario en Sheets: {e}")
 
 def load_feedback_gsheet():
     client = get_google_sheet_client()
@@ -233,7 +238,8 @@ def save_feedback_entry_gsheet(entry):
         sheet = client.open("GDI_Database").worksheet("feedback")
         row = [str(v) for v in entry.values()]
         sheet.append_row(row)
-    except: pass
+    except Exception as e:
+        st.error(f"Error guardando feedback en Sheets: {e}")
 
 # --- CONSTANTES ---
 LIMITES_USO = {"R": 2, "Sh": 2, "DC": 2, "Je": 4, "B": 4, "CS": 1, "Ve": 2, "DL": 2, "C": 5}
@@ -596,7 +602,7 @@ def recommend_outfit(df, weather, occasion, seed):
     try:
         fb = load_feedback_gsheet()
         if not fb.empty:
-            fb['DateObj'] = pd.to_datetime(fb['Date'], errors='coerce', dayfirst=True).dt.date
+            fb_side['DateObj'] = pd.to_datetime(fb_side['Date'], errors='coerce').dt.date
             today_obj = get_mendoza_time().date()
             rej = fb[(fb['DateObj'] == today_obj) & (fb['Action'].astype(str).str.strip() == 'Rejected')]
             blacklist = set(rej['Top'].dropna().tolist() + rej['Bottom'].dropna().tolist() + rej['Outer'].dropna().tolist())
@@ -774,7 +780,7 @@ try:
     found_today = False
     
     if not fb_side.empty and 'Action' in fb_side.columns:
-        fb_side['DateObj'] = pd.to_datetime(fb_side['Date'], errors='coerce', dayfirst=True).dt.date
+        fb_side['DateObj'] = pd.to_datetime(fb_side['Date'], errors='coerce').dt.date
         today_obj = get_mendoza_time().date()
         match_today = fb_side[(fb_side['DateObj'] == today_obj) & (fb_side['Action'].astype(str).str.strip() == 'Accepted')]
         
@@ -838,7 +844,7 @@ with tab1:
             fb = load_feedback_gsheet()
             if not fb.empty and 'Action' in fb.columns:
                 accepted = fb[fb['Action'].astype(str).str.strip() == 'Accepted'].copy()
-                accepted['DateObj'] = pd.to_datetime(accepted['Date'], errors='coerce', dayfirst=True).dt.date
+                accepted['DateObj'] = pd.to_datetime(accepted['Date'], errors='coerce').dt.date
                 match = accepted[(accepted['DateObj'] == get_mendoza_time().date()) & (accepted['Occasion'] == code_occ)]
                 if not match.empty: outfit_of_the_day = match.iloc[-1]
         except: pass
@@ -1360,7 +1366,7 @@ with tab5:
         try:
             fb_trend = load_feedback_gsheet()
             if not fb_trend.empty:
-                fb_trend['Date'] = pd.to_datetime(fb_trend['Date'], errors='coerce', dayfirst=True)
+                fb_trend['Date'] = pd.to_datetime(fb_trend['Date'], errors='coerce')
                 fb_trend = fb_trend.dropna(subset=['Date'])
                 fb_trend['Week'] = fb_trend['Date'].dt.to_period('W').apply(lambda r: r.start_time)
                 
@@ -1380,7 +1386,7 @@ with tab5:
     try:
         fb_cal = load_feedback_gsheet()
         if not fb_cal.empty:
-            fb_cal['DateObj'] = pd.to_datetime(fb_cal['Date'], errors='coerce', dayfirst=True).dt.date
+            fb_cal['DateObj'] = pd.to_datetime(fb_cal['Date'], errors='coerce').dt.date
             
             now = get_mendoza_time() 
             current_month = now.month
