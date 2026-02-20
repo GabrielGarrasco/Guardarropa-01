@@ -238,7 +238,7 @@ def save_feedback_entry_gsheet(entry):
     try:
         sheet = client.open("GDI_Database").worksheet("feedback")
         row = [str(v) for v in entry.values()]
-        sheet.append_row(row)
+        sheet.insert_row(row, index=2)
     except Exception as e:
         st.error(f"Error escribiendo en Feedback: {e}")
         st.stop()  # Congela la app acá para que puedas sacar la captura
@@ -604,7 +604,7 @@ def recommend_outfit(df, weather, occasion, seed):
     try:
         fb = load_feedback_gsheet()
         if not fb.empty:
-            fb_side['DateObj'] = pd.to_datetime(fb_side['Date'], errors='coerce').dt.date
+            fb['DateObj'] = pd.to_datetime(fb['Date'], errors='coerce').dt.date
             today_obj = get_mendoza_time().date()
             rej = fb[(fb['DateObj'] == today_obj) & (fb['Action'].astype(str).str.strip() == 'Rejected')]
             blacklist = set(rej['Top'].dropna().tolist() + rej['Bottom'].dropna().tolist() + rej['Outer'].dropna().tolist())
@@ -1033,12 +1033,28 @@ with tab1:
                     with c_o3: ro_flow = st.feedback("stars", key="s_out_f")
                 st.divider()
                 is_sweat = st.checkbox("💦 Transpiración Alta (Mandar todo a lavar)")
+                
                 if st.button("✅ Registrar Uso", type="primary", use_container_width=True):
+                    # 1. PREPARAMOS EL ENTRY PRIMERO PARA QUE NO SE PIERDA
+                    ra = r_abrigo; rc = r_comodidad + 1 if r_comodidad is not None else 3; rs = r_seguridad + 1 if r_seguridad is not None else 3
+                    v_rt_a = rt_abr; v_rt_c = rt_com + 1 if rt_com is not None else 3; v_rt_f = rt_flow + 1 if rt_flow is not None else 3
+                    v_rb_a = rb_abr; v_rb_c = rb_com + 1 if rb_com is not None else 3; v_rb_f = rb_flow + 1 if rb_flow is not None else 3
+                    v_ro_a = ro_abr; v_ro_c = ro_com + 1 if ro_com is not None else 3; v_ro_f = ro_flow + 1 if ro_flow is not None else 3
+                    
+                    entry = {'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada, 'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 'Rating_Abrigo': ra, 'Rating_Comodidad': rc, 'Rating_Seguridad': rs, 'Action': 'Accepted', 'Top_Abrigo': v_rt_a, 'Top_Comodidad': v_rt_c, 'Top_Flow': v_rt_f, 'Bot_Abrigo': v_rb_a, 'Bot_Comodidad': v_rb_c, 'Bot_Flow': v_rb_f, 'Out_Abrigo': v_ro_a, 'Out_Comodidad': v_ro_c, 'Out_Flow': v_ro_f}
+                    
+                    # Lo guardamos en memoria por si salta la alerta de límite
+                    st.session_state['pending_feedback_entry'] = entry
+
                     if is_sweat:
                         for item in selected_items_codes:
                             idx = df[df['Code'] == item['Code']].index[0]
                             df.at[idx, 'Status'] = 'Sucio'; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
-                        st.session_state['inventory'] = df; save_data_gsheet(df); st.toast("💦 A lavar."); st.session_state['change_mode'] = False; st.rerun()
+                        st.session_state['inventory'] = df; save_data_gsheet(df)
+                        
+                        save_feedback_entry_gsheet(entry) # <- SOLUCIÓN: Agregamos el guardado
+                        
+                        st.toast("💦 A lavar."); st.session_state['change_mode'] = False; st.rerun()
                     else:
                         alerts = []
                         for item in selected_items_codes:
@@ -1047,6 +1063,7 @@ with tab1:
                             limit = get_limit_for_item(item['Category'], sna)
                             current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
                             if (current_uses + 1) > limit: alerts.append({'code': item['Code'], 'cat': item['Category'], 'uses': current_uses, 'limit': limit})
+                        
                         if alerts:
                             st.session_state['alerts_buffer'] = alerts; st.session_state['confirm_stage'] = 1; st.rerun()
                         else:
@@ -1055,13 +1072,10 @@ with tab1:
                                 curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
                                 df.at[idx, 'Uses'] = curr + 1; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
                             st.session_state['inventory'] = df; save_data_gsheet(df)
-                            ra = r_abrigo; rc = r_comodidad + 1 if r_comodidad is not None else 3; rs = r_seguridad + 1 if r_seguridad is not None else 3
-                            v_rt_a = rt_abr; v_rt_c = rt_com + 1 if rt_com is not None else 3; v_rt_f = rt_flow + 1 if rt_flow is not None else 3
-                            v_rb_a = rb_abr; v_rb_c = rb_com + 1 if rb_com is not None else 3; v_rb_f = rb_flow + 1 if rb_flow is not None else 3
-                            v_ro_a = ro_abr; v_ro_c = ro_com + 1 if ro_com is not None else 3; v_ro_f = ro_flow + 1 if ro_flow is not None else 3
                             st.session_state['custom_overrides'] = {}; st.session_state['change_mode'] = False
-                            entry = {'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada, 'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 'Rating_Abrigo': ra, 'Rating_Comodidad': rc, 'Rating_Seguridad': rs, 'Action': 'Accepted', 'Top_Abrigo': v_rt_a, 'Top_Comodidad': v_rt_c, 'Top_Flow': v_rt_f, 'Bot_Abrigo': v_rb_a, 'Bot_Comodidad': v_rb_c, 'Bot_Flow': v_rb_f, 'Out_Abrigo': v_ro_a, 'Out_Comodidad': v_ro_c, 'Out_Flow': v_ro_f}
-                            save_feedback_entry_gsheet(entry); st.toast("¡Outfit registrado!"); st.rerun()
+                            
+                            save_feedback_entry_gsheet(entry) # <- Guardado normal
+                            st.toast("¡Outfit registrado!"); st.rerun()
 
             elif st.session_state['confirm_stage'] == 1:
                 st.error("🚨 ¡Límite de uso alcanzado!")
@@ -1072,10 +1086,18 @@ with tab1:
                         idx = df[df['Code'] == alert['code']].index[0]
                         df.at[idx, 'Status'] = 'Lavando'; df.at[idx, 'Uses'] = 0; df.at[idx, 'LaundryStart'] = datetime.now().isoformat()
                         save_data_gsheet(df); st.rerun()
+                    
                     if c_w2.button("👟 Usar igual", key=f"k_{alert['code']}"):
                         idx = df[df['Code'] == alert['code']].index[0]
                         curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
-                        df.at[idx, 'Uses'] = curr + 1; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d"); save_data_gsheet(df); st.session_state['confirm_stage'] = 0; st.session_state['alerts_buffer'] = []; st.session_state['change_mode'] = False; st.rerun()
+                        df.at[idx, 'Uses'] = curr + 1; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
+                        save_data_gsheet(df)
+                        
+                        # SOLUCIÓN: Guardamos el feedback que había quedado en pausa
+                        if 'pending_feedback_entry' in st.session_state:
+                            save_feedback_entry_gsheet(st.session_state['pending_feedback_entry'])
+                            
+                        st.session_state['confirm_stage'] = 0; st.session_state['alerts_buffer'] = []; st.session_state['change_mode'] = False; st.rerun()
     else: st.error("No hay ropa limpia disponible (según filtros). ¡Lavá algo!")
 
 with tab2: 
