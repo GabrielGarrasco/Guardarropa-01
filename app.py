@@ -233,15 +233,31 @@ def save_feedback_entry_gsheet(entry):
     client = get_google_sheet_client()
     if not client: 
         st.error("No se pudo conectar a Google Sheets.")
-        st.stop()  # Freno de mano
+        st.stop()
         return
     try:
         sheet = client.open("GDI_Database").worksheet("feedback")
-        row = [str(v) for v in entry.values()]
-        sheet.insert_row(row, index=2)
+        records = sheet.get_all_records()
+        
+        if records:
+            df = pd.DataFrame(records)
+            df.replace('', pd.NA, inplace=True)
+            df.dropna(how='all', inplace=True)
+        else:
+            df = pd.DataFrame(columns=entry.keys())
+            
+        new_row = pd.DataFrame([entry])
+        df = pd.concat([df, new_row], ignore_index=True)
+        df.fillna('', inplace=True)
+        
+        sheet.clear()
+        df_str = df.astype(str)
+        datos = [df_str.columns.values.tolist()] + df_str.values.tolist()
+        sheet.update(values=datos, range_name="A1")
+        
     except Exception as e:
         st.error(f"Error escribiendo en Feedback: {e}")
-        st.stop()  # Congela la app acá para que puedas sacar la captura
+        st.stop()
 
 # --- CONSTANTES ---
 LIMITES_USO = {"R": 2, "Sh": 2, "DC": 2, "Je": 4, "B": 4, "CS": 1, "Ve": 2, "DL": 2, "C": 5}
@@ -287,7 +303,7 @@ def decodificar_sna(codigo):
     try:
         c = str(codigo).strip()
         if len(c) < 4: return None
-        if c.startswith('Ri'): return None # La ropa interior no tiene SNA tradicional
+        if c.startswith('Ri'): return None 
         season = c[0]
         if len(c) > 2 and c[1:3] == 'CS': 
             tipo = 'CS' 
@@ -788,6 +804,7 @@ try:
         
         if not match_today.empty:
             found_today = True
+            match_today = match_today.sort_values('Date')
             last_fit = match_today.iloc[-1]
             
             def mostrar_mini_sidebar(code, label):
@@ -848,7 +865,9 @@ with tab1:
                 accepted = fb[fb['Action'].astype(str).str.strip() == 'Accepted'].copy()
                 accepted['DateObj'] = pd.to_datetime(accepted['Date'], errors='coerce').dt.date
                 match = accepted[(accepted['DateObj'] == get_mendoza_time().date()) & (accepted['Occasion'] == code_occ)]
-                if not match.empty: outfit_of_the_day = match.iloc[-1]
+                if not match.empty: 
+                    match = match.sort_values('Date')
+                    outfit_of_the_day = match.iloc[-1]
         except: pass
     
     coat_advice = ""
@@ -1052,7 +1071,7 @@ with tab1:
                             df.at[idx, 'Status'] = 'Sucio'; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
                         st.session_state['inventory'] = df; save_data_gsheet(df)
                         
-                        save_feedback_entry_gsheet(entry) # <- SOLUCIÓN: Agregamos el guardado
+                        save_feedback_entry_gsheet(entry) # <- Guardado Normal
                         
                         st.toast("💦 A lavar."); st.session_state['change_mode'] = False; st.rerun()
                     else:
@@ -1074,7 +1093,7 @@ with tab1:
                             st.session_state['inventory'] = df; save_data_gsheet(df)
                             st.session_state['custom_overrides'] = {}; st.session_state['change_mode'] = False
                             
-                            save_feedback_entry_gsheet(entry) # <- Guardado normal
+                            save_feedback_entry_gsheet(entry) # <- Guardado Normal
                             st.toast("¡Outfit registrado!"); st.rerun()
 
             elif st.session_state['confirm_stage'] == 1:
@@ -1093,7 +1112,7 @@ with tab1:
                         df.at[idx, 'Uses'] = curr + 1; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
                         save_data_gsheet(df)
                         
-                        # SOLUCIÓN: Guardamos el feedback que había quedado en pausa
+                        # Guardamos el feedback que había quedado en pausa
                         if 'pending_feedback_entry' in st.session_state:
                             save_feedback_entry_gsheet(st.session_state['pending_feedback_entry'])
                             
