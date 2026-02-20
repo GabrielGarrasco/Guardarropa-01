@@ -1454,14 +1454,13 @@ with tab5:
     except: st.error("No se pudo cargar el calendario.")
 
 with tab6:
-    st.header("✈️ Modo Viaje v3.0 (Smart - Lite)") 
+    st.header("✈️ Modo Viaje v3.2 (Smart - Lite)") 
     
-    # Variables de estado para controlar si estamos planificando o viajando
     if 'active_trip' not in st.session_state: st.session_state['active_trip'] = False
     if 'trip_current_day' not in st.session_state: st.session_state['trip_current_day'] = 0
 
     if not st.session_state['active_trip']:
-        # --- MODO PLANIFICACIÓN (ESTRUCTURA ORIGINAL) ---
+        # --- MODO PLANIFICACIÓN ---
         col_dest, col_days = st.columns([2, 1])
         with col_dest: dest_city = st.text_input("📍 Destino", value="Buenos Aires")
         with col_days: num_days = st.number_input("📅 Días Totales", min_value=1, max_value=30, value=5)
@@ -1491,12 +1490,12 @@ with tab6:
         
         st.divider()
         if st.button("🎒 Generar Propuesta de Valija", type="primary", use_container_width=True):
-            packable = df[df['Status'] == 'Limpio']
+            packable = df[df['Status'] == 'Limpio'].copy()
             forecast = st.session_state.get('travel_weather')
+            
             if packable.empty: 
                 st.error("¡No tenés ropa limpia para viajar!")
             else:
-                # --- TOPE DE PRENDAS PARA EVITAR VALIJAS INFINITAS ---
                 if num_days > 6:
                     st.info("🧺 Viaje largo: Te armo valija para 6 días, te va a tocar lavar allá para no cargar de más.")
                     req_daily_tops = 6
@@ -1505,36 +1504,49 @@ with tab6:
                     req_daily_tops = num_days 
                     req_daily_bots = (num_days // 2) + 1 
                 
+                # --- FILTRO CLIMÁTICO ESTRICTO ---
+                avg_max = st.session_state.get('travel_avg_max', 20) 
+                if forecast:
+                    def weather_filter(row):
+                        sna = decodificar_sna(row['Code'])
+                        if not sna: return True
+                        cat, attr = row['Category'], sna['attr']
+                        
+                        if avg_max > 25: # Hace calor
+                            if cat == 'Pantalón' and attr in ['Je', 'DL']: return False # No Jeans, no largo deportivo
+                            if cat in ['Remera', 'Camisa'] and attr == '02': return False # No manga larga
+                            if cat in ['Campera', 'Buzo'] and attr in ['03', '04', '05']: return False # No camperas pesadas
+                        elif avg_max < 15: # Hace frío
+                            if cat == 'Pantalón' and attr in ['Sh', 'DC']: return False # No shorts
+                            if cat in ['Remera', 'Camisa'] and attr == '00': return False # No musculosas
+                        return True
+                    
+                    packable = packable[packable.apply(weather_filter, axis=1)]
+
                 pool_home = packable[packable['Occasion'] == 'C']
                 pool_street = packable[packable['Occasion'].isin(['U', 'F'])]
                 pool_outs = packable[(packable['Category'].isin(['Campera', 'Buzo'])) & (packable['Occasion'].isin(['U', 'F', 'D']))]
 
-                avg_max = st.session_state.get('travel_avg_max', 20) 
-                if forecast:
-                    if avg_max > 25: 
-                        pool_street = pool_street[~pool_street['Code'].apply(lambda x: 'DL' in x)] 
-                        pool_outs = pool_outs[pool_outs['Code'].apply(lambda x: '04' not in x and '05' not in x)] 
-                    elif avg_max < 15: 
-                        pool_street = pool_street[~pool_street['Code'].apply(lambda x: 'Sh' in x or 'DC' in x)]
-                        pool_street = pool_street[~pool_street['Code'].apply(lambda x: '00' in x)]
-
                 final_pack = []
                 try: final_pack.append(pool_home[pool_home['Category'].isin(['Remera', 'Camisa'])].sample(1))
-                except: st.warning("No tienes remeras 'Casa' limpias para dormir.")
+                except: st.warning("No hay remeras de 'Casa' limpias/aptas para dormir.")
                 try: final_pack.append(pool_home[pool_home['Category'] == 'Pantalón'].sample(1))
-                except: st.warning("No tienes pantalones 'Casa' limpios para dormir.")
+                except: st.warning("No hay pantalones de 'Casa' limpios/aptos para dormir.")
 
                 avail_u_tops = pool_street[pool_street['Category'].isin(['Remera', 'Camisa'])]
                 avail_u_bots = pool_street[pool_street['Category'] == 'Pantalón']
-                final_pack.append(avail_u_tops.sample(min(len(avail_u_tops), req_daily_tops)))
-                final_pack.append(avail_u_bots.sample(min(len(avail_u_bots), req_daily_bots)))
-                final_pack.append(pool_outs.sample(min(len(pool_outs), 2)))
+                
+                if not avail_u_tops.empty: final_pack.append(avail_u_tops.sample(min(len(avail_u_tops), req_daily_tops)))
+                if not avail_u_bots.empty: final_pack.append(avail_u_bots.sample(min(len(avail_u_bots), req_daily_bots)))
+                if not pool_outs.empty: final_pack.append(pool_outs.sample(min(len(pool_outs), 2)))
 
                 if final_pack:
-                    st.session_state['travel_pack'] = pd.concat(final_pack).drop_duplicates()
+                    # Usamos drop_duplicates subset Code para evitar el DuplicateElementKey
+                    st.session_state['travel_pack'] = pd.concat(final_pack).drop_duplicates(subset=['Code'])
                     st.session_state['travel_selections'] = {} 
                     st.rerun()
-                else: st.error("No se pudo generar la valija (falta stock limpio).")
+                else: 
+                    st.error("No se pudo generar la valija (falta stock limpio que cumpla con el clima).")
 
         if st.session_state.get('travel_pack') is not None:
             pack = st.session_state['travel_pack'].copy()
@@ -1542,8 +1554,12 @@ with tab6:
             
             st.divider()
             st.subheader(f"🧳 Tu Valija ({len(pack)} prendas)")
+            
+            # --- SUGERENCIA ROPA INTERIOR ---
+            st.info(f"🩲 **Sugerencia de Ropa Interior:** Llevá **{num_days + 2} pares** (1 para cada día + 2 de repuesto).")
+            
             c_stats1, c_stats2 = st.columns(2)
-            c_stats1.info(f"🏠 Casa (Dormir): {len(pack[pack['Occasion'] == 'C'])}")
+            c_stats1.success(f"🏠 Casa (Dormir): {len(pack[pack['Occasion'] == 'C'])}")
             c_stats2.success(f"🎓 Universidad/Formal: {len(pack[pack['Occasion'].isin(['U', 'F'])] )}")
             
             cols = st.columns(3)
@@ -1557,30 +1573,41 @@ with tab6:
                         st.markdown(f"**{emoji_occ} {row['Category']}**")
                         st.caption(f"Code: `{row['Code']}`")
                         
-                        # Ticks originales de Ida y Vuelta
+                        # Checkboxes con Key segura sumándole "i"
                         c_ida, c_vuelta = st.columns(2)
-                        is_ida = c_ida.checkbox("Ida", key=f"ida_{row['Code']}")
-                        is_vuelta = c_vuelta.checkbox("Vuel", key=f"vuelta_{row['Code']}")
+                        is_ida = c_ida.checkbox("Ida", key=f"ida_{row['Code']}_{i}")
+                        is_vuelta = c_vuelta.checkbox("Vuel", key=f"vuelta_{row['Code']}_{i}")
                         if 'travel_selections' not in st.session_state: st.session_state['travel_selections'] = {}
                         st.session_state['travel_selections'][row['Code']] = {'ida': is_ida, 'vuelta': is_vuelta}
                         
-                        # --- NUEVO DROPDOWN PARA CAMBIAR PRENDA ---
-                        alt_pool = packable[(packable['Category'] == row['Category']) & (packable['Code'] != row['Code'])]
-                        if row['Occasion'] in ['U', 'F']:
-                            alt_pool = alt_pool[alt_pool['Occasion'].isin(['U', 'F'])]
+                        # --- DROPDOWN MEJORADO: Excluye repetidos, unifica Camisas/Remeras ---
+                        if row['Category'] in ['Remera', 'Camisa']:
+                            alt_pool = packable[packable['Category'].isin(['Remera', 'Camisa'])]
                         else:
-                            alt_pool = alt_pool[alt_pool['Occasion'] == row['Occasion']]
+                            alt_pool = packable[packable['Category'] == row['Category']]
                             
-                        alts = alt_pool['Code'].head(5).tolist()
-                        if alts:
-                            options = [f"Mantener {row['Code']}"] + alts
-                            choice = st.selectbox("Cambiar por:", options, key=f"swap_{row['Code']}", label_visibility="collapsed")
+                        # Filtro por ocasión y exclusión de los que ya están en la valija
+                        alt_pool = alt_pool[alt_pool['Occasion'] == row['Occasion']]
+                        alt_pool = alt_pool[~alt_pool['Code'].isin(pack['Code'])]
                             
-                            # Si elegís una alternativa, pisa el DF y resetea la pantalla
-                            if choice != f"Mantener {row['Code']}":
-                                pack.loc[pack['Code'] == row['Code']] = df[df['Code'] == choice].iloc[0].values
-                                st.session_state['travel_pack'] = pack
-                                st.rerun()
+                        alts = alt_pool['Code'].head(7).tolist()
+                        options = [f"Mantener {row['Code']}"] + alts + ["✍️ Ingresar código manual..."]
+                        choice = st.selectbox("Cambiar por:", options, key=f"swap_{row['Code']}_{i}", label_visibility="collapsed")
+                        
+                        if choice == "✍️ Ingresar código manual...":
+                            custom_code = st.text_input("Código a agregar:", key=f"custom_{row['Code']}_{i}")
+                            if custom_code:
+                                if custom_code in df['Code'].values:
+                                    if st.button("Confirmar cambio", key=f"conf_{row['Code']}_{i}"):
+                                        pack.loc[pack['Code'] == row['Code']] = df[df['Code'] == custom_code].iloc[0].values
+                                        st.session_state['travel_pack'] = pack
+                                        st.rerun()
+                                else:
+                                    st.error("El código no existe en BD.")
+                        elif choice != f"Mantener {row['Code']}":
+                            pack.loc[pack['Code'] == row['Code']] = df[df['Code'] == choice].iloc[0].values
+                            st.session_state['travel_pack'] = pack
+                            st.rerun()
 
             st.divider()
             sel = st.session_state.get('travel_selections', {})
@@ -1610,7 +1637,7 @@ with tab6:
             for i, item in enumerate(essentials): cols_ch[i % 2].checkbox(item, key=f"check_{i}")
 
     else:
-        # --- MODO VIAJE ACTIVO DÍA A DÍA ---
+        # --- MODO VIAJE ACTIVO ---
         st.success("✈️ ¡Modo viaje activado! Te sugiero prendas solo con tu valija.")
         
         forecast = st.session_state.get('travel_weather')
@@ -1631,13 +1658,11 @@ with tab6:
                 st.caption(f"{datetime.strptime(date_str, '%Y-%m-%d').strftime('%d/%m/%Y')}")
                 st.metric("Clima en Destino", f"{int(avg_t)}°C Prom.", f"{int(min_t)}° min / {int(max_t)}° max {get_weather_emoji(w_code)}")
                 
-                # Simulamos el formato del clima local para engañar a tu función de recomendación
                 trip_weather = {"temp": avg_t, "feels_like": avg_t, "min": min_t, "max": max_t, "desc": "Destino", "hourly_temp": [], "hourly_time": [], "wind": 10, "humidity": 50, "weather_code": w_code}
                 
                 occ_trip = st.selectbox("🎯 ¿Ocasión para hoy?", ["U (Turismo/Casual)", "F (Cena/Formal)", "C (Hotel/Dormir)"])
                 code_occ_trip = occ_trip[0]
                 
-                # Le pasamos "pack_df" (solo ropa de viaje) en vez del inventario completo
                 recs_trip, t_feel_trip, advice_trip = recommend_outfit(pack_df, trip_weather, code_occ_trip, random.randint(1, 1000))
                 
                 if not recs_trip.empty:
@@ -1679,7 +1704,6 @@ with tab6:
             st.error("Datos del viaje perdidos. Volviendo a Planificación...")
             st.session_state['active_trip'] = False
             st.rerun()
-
 with tab7:
     st.header("📅 Agenda de Eventos")
     st.info("Reserva outfits para fechas futuras. La IA no te sugerirá estas prendas antes de la fecha para que no se ensucien.")
