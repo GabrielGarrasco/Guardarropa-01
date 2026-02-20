@@ -208,19 +208,17 @@ def load_data_gsheet():
 
 def save_data_gsheet(df):
     client = get_google_sheet_client()
-    if not client: return
+    if not client: 
+        st.error("No se pudo conectar a Google Sheets.")
+        return
     try:
         sheet = client.open("GDI_Database").worksheet("inventory")
         sheet.clear()
         df_str = df.astype(str)
         datos = [df_str.columns.values.tolist()] + df_str.values.tolist()
-        # Compatibilidad dual para gspread viejo y nuevo
-        try:
-            sheet.update(values=datos, range_name="A1")
-        except TypeError:
-            sheet.update("A1", datos)
+        sheet.update(values=datos, range_name="A1")
     except Exception as e:
-        st.error(f"Error guardando inventario en Sheets: {e}")
+        st.error(f"Error escribiendo en Inventory: {e}")
 
 def load_feedback_gsheet():
     client = get_google_sheet_client()
@@ -233,13 +231,14 @@ def load_feedback_gsheet():
 
 def save_feedback_entry_gsheet(entry):
     client = get_google_sheet_client()
-    if not client: return
+    if not client: 
+        return
     try:
         sheet = client.open("GDI_Database").worksheet("feedback")
         row = [str(v) for v in entry.values()]
         sheet.append_row(row)
     except Exception as e:
-        st.error(f"Error guardando feedback en Sheets: {e}")
+        st.error(f"Error escribiendo en Feedback: {e}")
 
 # --- CONSTANTES ---
 LIMITES_USO = {"R": 2, "Sh": 2, "DC": 2, "Je": 4, "B": 4, "CS": 1, "Ve": 2, "DL": 2, "C": 5}
