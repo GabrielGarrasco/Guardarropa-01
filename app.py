@@ -557,7 +557,6 @@ def calculate_smart_score(item_row, current_temp, occasion, feedback_df, weather
 def is_item_usable(row):
     if 'Archived' in str(row['Status']): return False
     if row['Status'] != 'Limpio': return False
-    # Evitar que sugiera ropa interior
     if row['Category'] == 'Ropa interior': return False 
     sna = decodificar_sna(row['Code'])
     if not sna: return True
@@ -597,9 +596,9 @@ def recommend_outfit(df, weather, occasion, seed):
     try:
         fb = load_feedback_gsheet()
         if not fb.empty:
-            today = get_mendoza_time().strftime("%Y-%m-%d")
-            fb['Date'] = fb['Date'].astype(str)
-            rej = fb[(fb['Date'].str.contains(today, na=False)) & (fb['Action'] == 'Rejected')]
+            fb['DateObj'] = pd.to_datetime(fb['Date'], errors='coerce', dayfirst=True).dt.date
+            today_obj = get_mendoza_time().date()
+            rej = fb[(fb['DateObj'] == today_obj) & (fb['Action'].astype(str).str.strip() == 'Rejected')]
             blacklist = set(rej['Top'].dropna().tolist() + rej['Bottom'].dropna().tolist() + rej['Outer'].dropna().tolist())
     except: pass
     
@@ -719,7 +718,7 @@ def recommend_outfit(df, weather, occasion, seed):
             return candidates_df.sort_values('Final_Score', ascending=False).iloc[0]
         except: return candidates_df.sample(1, random_state=seed).iloc[0]
 
-    bot_item = get_best(['Pantalón'], 'bot'); 
+    bot_item = get_best(['Pantalón'], 'bot') 
     top = None
     if bot_item is not None:
         final.append(bot_item)
@@ -740,7 +739,7 @@ def calcular_peso_prenda(cat, code):
     if cat == 'Ropa interior':
         if code_str.startswith('RiBr'): return 71
         if code_str.startswith('RiB'): return 71
-        if code_str.startswith('RiM'): return 59 # Promedio medias
+        if code_str.startswith('RiM'): return 59 
         return 50
     if cat == 'Pantalón':
         if 'Je' in code_str: return 760
@@ -775,8 +774,9 @@ try:
     found_today = False
     
     if not fb_side.empty and 'Action' in fb_side.columns:
-        today_date = get_mendoza_time().strftime("%Y-%m-%d")
-        match_today = fb_side[(fb_side['Date'].astype(str).str.contains(today_date, na=False)) & (fb_side['Action'] == 'Accepted')]
+        fb_side['DateObj'] = pd.to_datetime(fb_side['Date'], errors='coerce', dayfirst=True).dt.date
+        today_obj = get_mendoza_time().date()
+        match_today = fb_side[(fb_side['DateObj'] == today_obj) & (fb_side['Action'].astype(str).str.strip() == 'Accepted')]
         
         if not match_today.empty:
             found_today = True
@@ -837,9 +837,9 @@ with tab1:
         try:
             fb = load_feedback_gsheet()
             if not fb.empty and 'Action' in fb.columns:
-                accepted = fb[fb['Action'] == 'Accepted']
-                accepted['Date'] = accepted['Date'].astype(str)
-                match = accepted[(accepted['Date'].str.contains(today_str, na=False)) & (accepted['Occasion'] == code_occ)]
+                accepted = fb[fb['Action'].astype(str).str.strip() == 'Accepted'].copy()
+                accepted['DateObj'] = pd.to_datetime(accepted['Date'], errors='coerce', dayfirst=True).dt.date
+                match = accepted[(accepted['DateObj'] == get_mendoza_time().date()) & (accepted['Occasion'] == code_occ)]
                 if not match.empty: outfit_of_the_day = match.iloc[-1]
         except: pass
     
@@ -1360,7 +1360,8 @@ with tab5:
         try:
             fb_trend = load_feedback_gsheet()
             if not fb_trend.empty:
-                fb_trend['Date'] = pd.to_datetime(fb_trend['Date'])
+                fb_trend['Date'] = pd.to_datetime(fb_trend['Date'], errors='coerce', dayfirst=True)
+                fb_trend = fb_trend.dropna(subset=['Date'])
                 fb_trend['Week'] = fb_trend['Date'].dt.to_period('W').apply(lambda r: r.start_time)
                 
                 weekly = fb_trend.groupby('Week')[['Rating_Comodidad', 'Rating_Seguridad']].mean().reset_index()
@@ -1379,8 +1380,9 @@ with tab5:
     try:
         fb_cal = load_feedback_gsheet()
         if not fb_cal.empty:
-            fb_cal['DateObj'] = pd.to_datetime(fb_cal['Date']).dt.date
-            now = datetime.now()
+            fb_cal['DateObj'] = pd.to_datetime(fb_cal['Date'], errors='coerce', dayfirst=True).dt.date
+            
+            now = get_mendoza_time() 
             current_month = now.month
             current_year = now.year
             cal = calendar.monthcalendar(current_year, current_month)
@@ -1396,7 +1398,7 @@ with tab5:
                         cols[i].write(" ")
                     else:
                         d_str = datetime(current_year, current_month, day).date()
-                        has_outfit = not fb_cal[(fb_cal['DateObj'] == d_str) & (fb_cal['Action'] == 'Accepted')].empty
+                        has_outfit = not fb_cal[(fb_cal['DateObj'] == d_str) & (fb_cal['Action'].astype(str).str.strip() == 'Accepted')].empty
                         marker = "🟢" if has_outfit else "⚪"
                         if d_str == now.date(): marker = "📍"
                         cols[i].write(f"{day} {marker}")
