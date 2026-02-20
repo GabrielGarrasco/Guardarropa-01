@@ -232,6 +232,8 @@ def load_feedback_gsheet():
 def save_feedback_entry_gsheet(entry):
     client = get_google_sheet_client()
     if not client: 
+        st.error("No se pudo conectar a Google Sheets.")
+        st.stop()  # Freno de mano
         return
     try:
         sheet = client.open("GDI_Database").worksheet("feedback")
@@ -239,6 +241,7 @@ def save_feedback_entry_gsheet(entry):
         sheet.append_row(row)
     except Exception as e:
         st.error(f"Error escribiendo en Feedback: {e}")
+        st.stop()  # Congela la app acá para que puedas sacar la captura
 
 # --- CONSTANTES ---
 LIMITES_USO = {"R": 2, "Sh": 2, "DC": 2, "Je": 4, "B": 4, "CS": 1, "Ve": 2, "DL": 2, "C": 5}
