@@ -1366,6 +1366,10 @@ with tab3:
                         if st.button("➖ Restar Uso"):
                             df.at[idx, 'Uses'] = max(0, curr_uses - 1)
                             st.session_state['inventory'] = df; save_data_gsheet(df); st.toast(f"📉 Usos: {max(0, curr_uses - 1)}"); st.rerun()
+                    with c_act3:
+                        if st.button("🧺 Sucio"):
+                            df.at[idx, 'Status'] = 'Sucio'
+                            st.session_state['inventory'] = df; save_data_gsheet(df); st.toast("🧺 ¡Directo a lavar!"); st.rerun()
                     
                     st.divider()
                     st.caption("Zona de Archivo (Desaparece del armario)")
