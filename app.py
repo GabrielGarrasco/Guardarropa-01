@@ -77,7 +77,7 @@ class OutfitAI:
             
             def calculate_weighted_score(row):
                 if row['Action'] == 'Rejected': return 0
-                r_abr = float(row.get('Rating_Abrigo', 4))
+                r_abr = float(row.get('Rating_Abrigo', 7)) # Modificado para escala 1-14
                 r_com = float(row.get('Rating_Comodidad', 3))
                 r_seg = float(row.get('Rating_Seguridad', 3))
                 temp = float(row.get('Temp_Real', 20))
@@ -88,7 +88,7 @@ class OutfitAI:
                 
                 total_w = w_abr + w_seg + w_com
                 weighted_avg = ((r_abr * w_abr) + (r_seg * w_seg) + (r_com * w_com)) / total_w
-                return (weighted_avg / 7) * 100
+                return (weighted_avg / 14) * 100 # Cambiado de 7 a 14
 
             data['Target_Score'] = data.apply(calculate_weighted_score, axis=1)
 
@@ -165,7 +165,7 @@ class OutfitAI:
 if 'outfit_ai' not in st.session_state: st.session_state['outfit_ai'] = OutfitAI()
 
 # ==========================================
-# --- CONEXIÓN A GOOGLE SHEETS ---
+# --- CONEXIÓN A GOOGLE SHEETS (CON CACHÉ) ---
 # ==========================================
 def get_google_sheet_client():
     try:
@@ -176,7 +176,8 @@ def get_google_sheet_client():
         return client
     except: return None
 
-def load_data_gsheet():
+@st.cache_data(ttl=600)
+def _fetch_inventory():
     client = get_google_sheet_client()
     if not client: return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
     try:
@@ -201,12 +202,15 @@ def load_data_gsheet():
                 except: pass
         
         if changed:
-            save_data_gsheet(df)
+            _save_data_gsheet_direct(df)
             
         return df
     except: return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
 
-def save_data_gsheet(df):
+def load_data_gsheet():
+    return _fetch_inventory()
+
+def _save_data_gsheet_direct(df):
     client = get_google_sheet_client()
     if not client: 
         st.error("No se pudo conectar a Google Sheets.")
@@ -220,21 +224,45 @@ def save_data_gsheet(df):
     except Exception as e:
         st.error(f"Error escribiendo en Inventory: {e}")
 
-def load_feedback_gsheet():
+def save_data_gsheet(df):
+    _save_data_gsheet_direct(df)
+    _fetch_inventory.clear() # Limpia caché al guardar
+
+@st.cache_data(ttl=600)
+def _fetch_feedback():
     client = get_google_sheet_client()
     if not client: return pd.DataFrame()
     try:
         sheet = client.open("GDI_Database").worksheet("feedback")
         data = sheet.get_all_records()
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        
+        # --- EQUIVALENCIA ESCALA 1-7 A 1-14 PARA DATOS VIEJOS ---
+        if not df.empty and 'Rating_Abrigo' in df.columns:
+            df['DateObj'] = pd.to_datetime(df['Date'], errors='coerce')
+            cutoff_date = pd.to_datetime('2026-03-27') # Fecha de actualización
+            is_old = df['DateObj'] < cutoff_date
+            
+            cols_to_scale = ['Rating_Abrigo', 'Top_Abrigo', 'Bot_Abrigo', 'Out_Abrigo']
+            for col in cols_to_scale:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(7)
+                    # Fórmula matemática de equivalencia (Viejo 4 -> Nuevo 7)
+                    df.loc[is_old, col] = ((df.loc[is_old, col] - 1) * (13.0 / 6.0) + 1).round().clip(1, 14)
+            
+            df.drop(columns=['DateObj'], inplace=True, errors='ignore')
+            
+        return df
     except: return pd.DataFrame()
+
+def load_feedback_gsheet():
+    return _fetch_feedback()
 
 def save_feedback_entry_gsheet(entry):
     client = get_google_sheet_client()
     if not client: 
-        st.error("No se pudo conectar a Google Sheets.")
-        st.stop()
-        return
+        st.error("No se pudo conectar a Google Sheets para guardar feedback.")
+        return False
     try:
         sheet = client.open("GDI_Database").worksheet("feedback")
         records = sheet.get_all_records()
@@ -255,14 +283,17 @@ def save_feedback_entry_gsheet(entry):
         datos = [df_str.columns.values.tolist()] + df_str.values.tolist()
         sheet.update(values=datos, range_name="A1")
         
+        _fetch_feedback.clear() # Limpia caché de feedback
+        return True
     except Exception as e:
         st.error(f"Error escribiendo en Feedback: {e}")
-        st.stop()
+        return False
 
 # ==========================================
-# --- NUEVO: CARGA Y GUARDADO DE MODO VIAJE ---
+# --- CARGA Y GUARDADO DE MODO VIAJE ---
 # ==========================================
-def load_travel_gsheet():
+@st.cache_data(ttl=600)
+def _fetch_travel():
     client = get_google_sheet_client()
     if not client: return {}
     try:
@@ -277,18 +308,7 @@ def load_travel_gsheet():
     except: return {}
 
 def load_travel_gsheet():
-    client = get_google_sheet_client()
-    if not client: return {}
-    try:
-        sheet = client.open("GDI_Database").worksheet("travel")
-        data = sheet.get_all_records()
-        if data and 'state_json' in data[0]:
-            state = json.loads(data[0]['state_json'])
-            if 'travel_pack' in state and state['travel_pack']:
-                state['travel_pack'] = pd.DataFrame(state['travel_pack'])
-            return state
-        return {}
-    except: return {}
+    return _fetch_travel()
 
 def save_travel_gsheet(state_dict):
     client = get_google_sheet_client()
@@ -296,7 +316,6 @@ def save_travel_gsheet(state_dict):
     try:
         sheet = client.open("GDI_Database").worksheet("travel")
         
-        # 1. Aseguramos que las selecciones sean booleanos puros
         safe_selections = {}
         if 'travel_selections' in state_dict and state_dict['travel_selections']:
             for k, v in state_dict['travel_selections'].items():
@@ -308,7 +327,6 @@ def save_travel_gsheet(state_dict):
             'travel_selections': safe_selections
         }
         
-        # 2. CLAVE: Convertimos el DataFrame entero a string para matar los int64 y NaNs de Pandas
         if 'travel_pack' in state_dict and isinstance(state_dict.get('travel_pack'), pd.DataFrame):
             df_safe = state_dict['travel_pack'].fillna('').astype(str)
             state_copy['travel_pack'] = df_safe.to_dict(orient='records')
@@ -316,6 +334,7 @@ def save_travel_gsheet(state_dict):
         sheet.clear()
         json_str = json.dumps(state_copy)
         sheet.update(values=[["state_json"], [json_str]], range_name="A1")
+        _fetch_travel.clear()
         
     except Exception as e:
         st.error(f"Error técnico guardando en Sheets: {e}")
@@ -429,8 +448,8 @@ def check_harmony(code_top, code_bot):
 def get_weather_open_meteo():
     try:
         url = "https://api.open-meteo.com/v1/forecast?latitude=-32.8908&longitude=-68.8272&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m&daily=temperature_2m_max,temperature_2m_min&hourly=temperature_2m&timezone=auto"
-        res = requests.get(url).json()
-        if 'current' not in res: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error API", "hourly_temp": [], "hourly_time": [], "wind": 0, "humidity": 50}
+        res = requests.get(url, timeout=5).json()
+        if 'current' not in res: return {"temp": 15, "feels_like": 14, "min": 10, "max": 20, "desc": "Error API", "hourly_temp": [], "hourly_time": [], "wind": 0, "humidity": 50, "weather_code": 0}
         current = res['current']
         daily = res['daily']
         hourly = res.get('hourly', {})
@@ -531,7 +550,7 @@ def enviar_briefing_diario():
         rain_warning = ""
         try:
             url_rain = "https://api.open-meteo.com/v1/forecast?latitude=-32.8908&longitude=-68.8272&hourly=precipitation_probability&timezone=auto&forecast_days=1"
-            res_rain = requests.get(url_rain).json()
+            res_rain = requests.get(url_rain, timeout=5).json()
             probs = res_rain['hourly']['precipitation_probability']
             times = res_rain['hourly']['time']
             now_hour = datetime.now().hour
@@ -668,7 +687,8 @@ def get_thermal_offset(feedback_df):
     try:
         avg_abrigo = pd.to_numeric(feedback_df['Rating_Abrigo'], errors='coerce').mean()
         if pd.isna(avg_abrigo): return 3
-        custom_offset = 3 + (4 - avg_abrigo)
+        # Offset adaptado para escala 1-14 (7 es el neutro ideal)
+        custom_offset = 3 + (7 - avg_abrigo) * (3/7) 
         return custom_offset
     except: return 3
 
@@ -1054,6 +1074,49 @@ with tab1:
 
         st.divider()
 
+        # ==========================================
+        # NUEVO MÓDULO: CALIFICAR LO QUE TENGO PUESTO AHORA
+        # ==========================================
+        if outfit_of_the_day is not None and not st.session_state['change_mode']:
+            st.markdown("### ⏱️ Calificar Ropa en las Condiciones Actuales")
+            st.caption("Si cambió el clima desde que registraste el outfit, usá esto para evaluar cómo se siente AHORA.")
+            with st.expander("Calificar Ahora", expanded=False):
+                w_now = get_weather_open_meteo()
+                st.info(f"📍 Clima en este momento: {w_now['temp']}°C | Viento: {w_now['wind']}km/h")
+                
+                c_now1, c_now2, c_now3 = st.columns(3)
+                with c_now1: r_abr_now = st.select_slider("Sensación Térmica (1-14)", options=list(range(1, 15)), value=7, key="live_abr")
+                with c_now2: r_com_now = st.feedback("stars", key="live_com")
+                with c_now3: r_flow_now = st.feedback("stars", key="live_flow")
+                
+                if st.button("✅ Registrar Feedback Actual", use_container_width=True):
+                    try:
+                        rc_n = r_com_now + 1 if r_com_now is not None else 3
+                        rf_n = r_flow_now + 1 if r_flow_now is not None else 3
+                        
+                        entry_now = {
+                            'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 
+                            'City': user_city, 
+                            'Temp_Real': w_now['temp'], 
+                            'User_Adj_Temp': w_now['temp'], 
+                            'Occasion': code_occ, 
+                            'Top': outfit_of_the_day['Top'], 
+                            'Bottom': outfit_of_the_day['Bottom'], 
+                            'Outer': outfit_of_the_day['Outer'], 
+                            'Rating_Abrigo': r_abr_now, 
+                            'Rating_Comodidad': rc_n, 
+                            'Rating_Seguridad': rf_n, 
+                            'Action': 'Accepted', 
+                            'Top_Abrigo': r_abr_now, 'Top_Comodidad': rc_n, 'Top_Flow': rf_n, 
+                            'Bot_Abrigo': r_abr_now, 'Bot_Comodidad': rc_n, 'Bot_Flow': rf_n, 
+                            'Out_Abrigo': r_abr_now, 'Out_Comodidad': rc_n, 'Out_Flow': rf_n
+                        }
+                        if save_feedback_entry_gsheet(entry_now):
+                            st.toast("¡Datos climáticos actuales registrados!")
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Error registrando datos: {e}")
+
         if st.session_state['change_mode']:
             st.info("¿Qué falló en esta propuesta?")
             with st.container(border=True):
@@ -1062,7 +1125,7 @@ with tab1:
                         horizontal=True)
 
                 if st.button("🎲 Dame otra opción"):
-                    ra = 3
+                    ra = 7 # Neutro en la nueva escala 1-14
                     if reason == "Hace frío/calor para esto": ra = 1 
                     
                     entry = {
@@ -1094,77 +1157,84 @@ with tab1:
                 def show_gradient_bar(): st.markdown('<div style="background: linear-gradient(90deg, #3b82f6 0%, #ffffff 50%, #ef4444 100%); height: 8px; border-radius: 4px; margin-bottom: 5px; opacity: 0.8;"></div>', unsafe_allow_html=True)
                 st.caption("Outfit Completo")
                 c_fb1, c_fb2, c_fb3 = st.columns(3)
-                with c_fb1: st.markdown("**🌡️ Abrigo (1-7)**"); show_gradient_bar(); r_abrigo = st.select_slider("Global Abrigo", options=[1, 2, 3, 4, 5, 6, 7], value=4, label_visibility="collapsed", key="fb_abrigo")
+                
+                # ESCALA ACTUALIZADA 1 A 14
+                with c_fb1: st.markdown("**🌡️ Abrigo (1-14)**"); show_gradient_bar(); r_abrigo = st.select_slider("Global Abrigo", options=list(range(1, 15)), value=7, label_visibility="collapsed", key="fb_abrigo")
                 with c_fb2: st.markdown("**☁️ Comodidad**"); r_comodidad = st.feedback("stars", key="fb_comodidad")
                 with c_fb3: st.markdown("**⚡ Flow**"); r_seguridad = st.feedback("stars", key="fb_estilo")
                 st.divider()
                 st.markdown("### 🧥 Detalle por Prenda")
-                rt_abr, rt_com, rt_flow = 4, None, None
+                rt_abr, rt_com, rt_flow = 7, None, None
                 if rec_top and rec_top != "N/A":
                     st.markdown(f"**Top:** `{rec_top}`")
                     c_t1, c_t2, c_t3 = st.columns(3)
-                    with c_t1: show_gradient_bar(); rt_abr = st.select_slider("Top Abr", options=[1, 2, 3, 4, 5, 6, 7], value=4, label_visibility="collapsed", key="s_top_a")
+                    with c_t1: show_gradient_bar(); rt_abr = st.select_slider("Top Abr", options=list(range(1, 15)), value=7, label_visibility="collapsed", key="s_top_a")
                     with c_t2: rt_com = st.feedback("stars", key="s_top_c")
                     with c_t3: rt_flow = st.feedback("stars", key="s_top_f")
-                rb_abr, rb_com, rb_flow = 4, None, None
+                rb_abr, rb_com, rb_flow = 7, None, None
                 if rec_bot and rec_bot != "N/A":
                     st.markdown(f"**Bottom:** `{rec_bot}`")
                     c_b1, c_b2, c_b3 = st.columns(3)
-                    with c_b1: show_gradient_bar(); rb_abr = st.select_slider("Bot Abr", options=[1, 2, 3, 4, 5, 6, 7], value=4, label_visibility="collapsed", key="s_bot_a")
+                    with c_b1: show_gradient_bar(); rb_abr = st.select_slider("Bot Abr", options=list(range(1, 15)), value=7, label_visibility="collapsed", key="s_bot_a")
                     with c_b2: rb_com = st.feedback("stars", key="s_bot_c")
                     with c_b3: rb_flow = st.feedback("stars", key="s_bot_f")
-                ro_abr, ro_com, ro_flow = 4, None, None
+                ro_abr, ro_com, ro_flow = 7, None, None
                 if rec_out and rec_out != "N/A":
                     st.markdown(f"**Outer:** `{rec_out}`")
                     c_o1, c_o2, c_o3 = st.columns(3)
-                    with c_o1: show_gradient_bar(); ro_abr = st.select_slider("Out Abr", options=[1, 2, 3, 4, 5, 6, 7], value=4, label_visibility="collapsed", key="s_out_a")
+                    with c_o1: show_gradient_bar(); ro_abr = st.select_slider("Out Abr", options=list(range(1, 15)), value=7, label_visibility="collapsed", key="s_out_a")
                     with c_o2: ro_com = st.feedback("stars", key="s_out_c")
                     with c_o3: ro_flow = st.feedback("stars", key="s_out_f")
                 st.divider()
                 is_sweat = st.checkbox("💦 Transpiración Alta (Mandar todo a lavar)")
                 
                 if st.button("✅ Registrar Uso", type="primary", use_container_width=True):
-                    # 1. PREPARAMOS EL ENTRY PRIMERO PARA QUE NO SE PIERDA
-                    ra = r_abrigo; rc = r_comodidad + 1 if r_comodidad is not None else 3; rs = r_seguridad + 1 if r_seguridad is not None else 3
-                    v_rt_a = rt_abr; v_rt_c = rt_com + 1 if rt_com is not None else 3; v_rt_f = rt_flow + 1 if rt_flow is not None else 3
-                    v_rb_a = rb_abr; v_rb_c = rb_com + 1 if rb_com is not None else 3; v_rb_f = rb_flow + 1 if rb_flow is not None else 3
-                    v_ro_a = ro_abr; v_ro_c = ro_com + 1 if ro_com is not None else 3; v_ro_f = ro_flow + 1 if ro_flow is not None else 3
-                    
-                    entry = {'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada, 'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 'Rating_Abrigo': ra, 'Rating_Comodidad': rc, 'Rating_Seguridad': rs, 'Action': 'Accepted', 'Top_Abrigo': v_rt_a, 'Top_Comodidad': v_rt_c, 'Top_Flow': v_rt_f, 'Bot_Abrigo': v_rb_a, 'Bot_Comodidad': v_rb_c, 'Bot_Flow': v_rb_f, 'Out_Abrigo': v_ro_a, 'Out_Comodidad': v_ro_c, 'Out_Flow': v_ro_f}
-                    
-                    # Lo guardamos en memoria por si salta la alerta de límite
-                    st.session_state['pending_feedback_entry'] = entry
+                    # Separar el guardado de datos del guardado de feedback en bloques Try-Except blindados
+                    try:
+                        ra = r_abrigo; rc = r_comodidad + 1 if r_comodidad is not None else 3; rs = r_seguridad + 1 if r_seguridad is not None else 3
+                        v_rt_a = rt_abr; v_rt_c = rt_com + 1 if rt_com is not None else 3; v_rt_f = rt_flow + 1 if rt_flow is not None else 3
+                        v_rb_a = rb_abr; v_rb_c = rb_com + 1 if rb_com is not None else 3; v_rb_f = rb_flow + 1 if rb_flow is not None else 3
+                        v_ro_a = ro_abr; v_ro_c = ro_com + 1 if ro_com is not None else 3; v_ro_f = ro_flow + 1 if ro_flow is not None else 3
+                        
+                        entry = {'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': temp_calculada, 'Occasion': code_occ, 'Top': rec_top, 'Bottom': rec_bot, 'Outer': rec_out, 'Rating_Abrigo': ra, 'Rating_Comodidad': rc, 'Rating_Seguridad': rs, 'Action': 'Accepted', 'Top_Abrigo': v_rt_a, 'Top_Comodidad': v_rt_c, 'Top_Flow': v_rt_f, 'Bot_Abrigo': v_rb_a, 'Bot_Comodidad': v_rb_c, 'Bot_Flow': v_rb_f, 'Out_Abrigo': v_ro_a, 'Out_Comodidad': v_ro_c, 'Out_Flow': v_ro_f}
+                        st.session_state['pending_feedback_entry'] = entry
 
-                    if is_sweat:
-                        for item in selected_items_codes:
-                            idx = df[df['Code'] == item['Code']].index[0]
-                            df.at[idx, 'Status'] = 'Sucio'; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
-                        st.session_state['inventory'] = df; save_data_gsheet(df)
-                        
-                        save_feedback_entry_gsheet(entry) # <- Guardado Normal
-                        
-                        st.toast("💦 A lavar."); st.session_state['change_mode'] = False; st.rerun()
-                    else:
-                        alerts = []
-                        for item in selected_items_codes:
-                            idx = df[df['Code'] == item['Code']].index[0]
-                            sna = decodificar_sna(item['Code'])
-                            limit = get_limit_for_item(item['Category'], sna)
-                            current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
-                            if (current_uses + 1) > limit: alerts.append({'code': item['Code'], 'cat': item['Category'], 'uses': current_uses, 'limit': limit})
-                        
-                        if alerts:
-                            st.session_state['alerts_buffer'] = alerts; st.session_state['confirm_stage'] = 1; st.rerun()
-                        else:
+                        if is_sweat:
                             for item in selected_items_codes:
                                 idx = df[df['Code'] == item['Code']].index[0]
-                                curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
-                                df.at[idx, 'Uses'] = curr + 1; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
+                                df.at[idx, 'Status'] = 'Sucio'; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
                             st.session_state['inventory'] = df; save_data_gsheet(df)
-                            st.session_state['custom_overrides'] = {}; st.session_state['change_mode'] = False
                             
-                            save_feedback_entry_gsheet(entry) # <- Guardado Normal
-                            st.toast("¡Outfit registrado!"); st.rerun()
+                            save_feedback_entry_gsheet(entry)
+                            
+                            st.toast("💦 A lavar."); st.session_state['change_mode'] = False; st.rerun()
+                        else:
+                            alerts = []
+                            for item in selected_items_codes:
+                                idx = df[df['Code'] == item['Code']].index[0]
+                                sna = decodificar_sna(item['Code'])
+                                limit = get_limit_for_item(item['Category'], sna)
+                                current_uses = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
+                                if (current_uses + 1) > limit: alerts.append({'code': item['Code'], 'cat': item['Category'], 'uses': current_uses, 'limit': limit})
+                            
+                            if alerts:
+                                st.session_state['alerts_buffer'] = alerts; st.session_state['confirm_stage'] = 1; st.rerun()
+                            else:
+                                for item in selected_items_codes:
+                                    idx = df[df['Code'] == item['Code']].index[0]
+                                    curr = int(float(df.at[idx, 'Uses'])) if df.at[idx, 'Uses'] not in ['', 'nan'] else 0
+                                    df.at[idx, 'Uses'] = curr + 1; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
+                                st.session_state['inventory'] = df; save_data_gsheet(df)
+                                st.session_state['custom_overrides'] = {}; st.session_state['change_mode'] = False
+                                
+                                # Si falla el feedback al menos el inventario ya se sumó
+                                if save_feedback_entry_gsheet(entry):
+                                    st.toast("¡Outfit registrado!")
+                                else:
+                                    st.warning("Se actualizaron los usos, pero falló el registro en Feedback.")
+                                st.rerun()
+                    except Exception as e:
+                        st.error(f"Error crítico guardando datos: {e}")
 
             elif st.session_state['confirm_stage'] == 1:
                 st.error("🚨 ¡Límite de uso alcanzado!")
@@ -1182,7 +1252,6 @@ with tab1:
                         df.at[idx, 'Uses'] = curr + 1; df.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
                         save_data_gsheet(df)
                         
-                        # Guardamos el feedback que había quedado en pausa
                         if 'pending_feedback_entry' in st.session_state:
                             save_feedback_entry_gsheet(st.session_state['pending_feedback_entry'])
                             
@@ -1197,14 +1266,12 @@ with tab2:
             dirty_pool = df[df['Status'].isin(['Sucio', 'Lavando'])]
             clean_pool = df[df['Status'] == 'Limpio']
             
-            # 1. APRENDIZAJE DE CAPACIDAD (Peso exacto basado en la nueva función)
             df['Weight_Est'] = df.apply(lambda r: calcular_peso_prenda(r['Category'], r['Code']), axis=1)
             
-            learned_capacity = 4000 # Default 4kg
+            learned_capacity = 4000 
             try:
                 history_wash = df[df['LaundryStart'] != '']
                 if not history_wash.empty:
-                    # IA APRENDE DEL LOTE: Agrupa por la marca de tiempo exacta
                     daily_loads = history_wash.groupby('LaundryStart')['Weight_Est'].sum()
                     real_loads = daily_loads[daily_loads > 1000]
                     if not real_loads.empty:
@@ -1261,7 +1328,6 @@ with tab2:
     if not dirty_list.empty: st.dataframe(dirty_list[['Code', 'Category', 'Uses', 'Status']], use_container_width=True)
     else: st.info("Todo impecable ✨")
     
-    # --- NUEVA LÓGICA DE LAVADO POR LOTE ---
     if 'wash_batch' not in st.session_state: st.session_state['wash_batch'] = []
 
     with st.container(border=True):
@@ -1587,12 +1653,12 @@ with tab6:
                         cat, attr = row['Category'], sna['attr']
                         
                         if avg_max > 25: # Hace calor
-                            if cat == 'Pantalón' and attr in ['Je', 'DL']: return False # No Jeans, no largo deportivo
-                            if cat in ['Remera', 'Camisa'] and attr == '02': return False # No manga larga
-                            if cat in ['Campera', 'Buzo'] and attr in ['03', '04', '05']: return False # No camperas pesadas
+                            if cat == 'Pantalón' and attr in ['Je', 'DL']: return False 
+                            if cat in ['Remera', 'Camisa'] and attr == '02': return False 
+                            if cat in ['Campera', 'Buzo'] and attr in ['03', '04', '05']: return False 
                         elif avg_max < 15: # Hace frío
-                            if cat == 'Pantalón' and attr in ['Sh', 'DC']: return False # No shorts
-                            if cat in ['Remera', 'Camisa'] and attr == '00': return False # No musculosas
+                            if cat == 'Pantalón' and attr in ['Sh', 'DC']: return False 
+                            if cat in ['Remera', 'Camisa'] and attr == '00': return False 
                         return True
                     
                     packable = packable[packable.apply(weather_filter, axis=1)]
@@ -1615,7 +1681,6 @@ with tab6:
                 if not pool_outs.empty: final_pack.append(pool_outs.sample(min(len(pool_outs), 2)))
 
                 if final_pack:
-                    # Usamos drop_duplicates subset Code para evitar el DuplicateElementKey
                     st.session_state['travel_pack'] = pd.concat(final_pack).drop_duplicates(subset=['Code'])
                     st.session_state['travel_selections'] = {} 
                     st.rerun()
@@ -1629,13 +1694,11 @@ with tab6:
             st.divider()
             st.subheader(f"🧳 Tu Valija ({len(pack)} prendas)")
             
-            # --- NUEVO BOTÓN DE GUARDADO ---
             if st.button("💾 Guardar Valija en la Nube", type="primary", use_container_width=True):
                 st.session_state['travel_pack'] = pack 
                 save_travel_gsheet(st.session_state)
                 st.success("¡Valija sincronizada! Ya podés abrir la app en el celular.")
             
-            # --- SUGERENCIA ROPA INTERIOR ---
             st.info(f"🩲 **Sugerencia de Ropa Interior:** Llevá **{num_days + 2} pares** (1 para cada día + 2 de repuesto).")
             
             c_stats1, c_stats2 = st.columns(2)
@@ -1653,20 +1716,17 @@ with tab6:
                         st.markdown(f"**{emoji_occ} {row['Category']}**")
                         st.caption(f"Code: `{row['Code']}`")
                         
-                        # Checkboxes con Key segura sumándole "i"
                         c_ida, c_vuelta = st.columns(2)
                         is_ida = c_ida.checkbox("Ida", key=f"ida_{row['Code']}_{i}")
                         is_vuelta = c_vuelta.checkbox("Vuel", key=f"vuelta_{row['Code']}_{i}")
                         if 'travel_selections' not in st.session_state: st.session_state['travel_selections'] = {}
                         st.session_state['travel_selections'][row['Code']] = {'ida': is_ida, 'vuelta': is_vuelta}
                         
-                        # --- DROPDOWN MEJORADO: Excluye repetidos, unifica Camisas/Remeras ---
                         if row['Category'] in ['Remera', 'Camisa']:
                             alt_pool = packable[packable['Category'].isin(['Remera', 'Camisa'])]
                         else:
                             alt_pool = packable[packable['Category'] == row['Category']]
                             
-                        # Filtro por ocasión y exclusión de los que ya están en la valija
                         alt_pool = alt_pool[alt_pool['Occasion'] == row['Occasion']]
                         alt_pool = alt_pool[~alt_pool['Code'].isin(pack['Code'])]
                             
@@ -1703,14 +1763,14 @@ with tab6:
                 if st.session_state.get('travel_weather'):
                     st.session_state['active_trip'] = True
                     st.session_state['trip_current_day'] = 0
-                    save_travel_gsheet(st.session_state) # --- NUEVO GUARDADO ---
+                    save_travel_gsheet(st.session_state)
                     st.rerun()
                 else:
                     st.error("Analizá el clima del destino primero.")
                     
             if col_del.button("🗑️ Borrar Valija", type="secondary", use_container_width=True):
                 st.session_state['travel_pack'] = None; st.session_state['travel_selections'] = {}; st.session_state['active_trip'] = False
-                save_travel_gsheet(st.session_state) # --- NUEVO GUARDADO ---
+                save_travel_gsheet(st.session_state)
                 st.rerun()
 
         st.divider()
@@ -1772,19 +1832,19 @@ with tab6:
                 col_next, col_end = st.columns(2)
                 if col_next.button("⏭️ Avanzar de Día", use_container_width=True):
                     st.session_state['trip_current_day'] += 1
-                    save_travel_gsheet(st.session_state) # --- NUEVO GUARDADO ---
+                    save_travel_gsheet(st.session_state) 
                     st.rerun()
                 if col_end.button("🛑 Terminar Viaje", type="secondary", use_container_width=True):
                     st.session_state['active_trip'] = False
                     st.session_state['travel_pack'] = None
-                    save_travel_gsheet(st.session_state) # --- NUEVO GUARDADO ---
+                    save_travel_gsheet(st.session_state) 
                     st.rerun()
             else:
                 st.info("¡Fin del viaje programado!")
                 if st.button("🏠 Desarmar Valija y volver", type="primary", use_container_width=True):
                     st.session_state['active_trip'] = False
                     st.session_state['travel_pack'] = None
-                    save_travel_gsheet(st.session_state) # --- NUEVO GUARDADO ---
+                    save_travel_gsheet(st.session_state) 
                     st.rerun()
         else:
             st.error("Datos del viaje perdidos. Volviendo a Planificación...")
@@ -1858,7 +1918,7 @@ if bot:
 
         elif call.data == "manual_mode":
             bot.answer_callback_query(call.id)
-            bot.send_message(call.message.chat.id, "🛠️ Entendido. Abre la app para editar manualmente: https://gdi-mendoza-ops-v21.streamlit.app")
+            bot.send_message(call.message.chat.id, "🛠️ Entendido. Abre la app para editar manualmente.")
 
 def enviar_sugerencia_interactiva(occ_code, chat_id, force_new_seed=False):
     if not bot: return
@@ -1921,8 +1981,7 @@ def tarea_noche():
     try:
         msg = (
             "🌙 *Check de fin de día*\n"
-            "No olvides calificar el outfit sugerido hoy para mejorar la IA.\n\n"
-            "👉 [Abrir GDI: Mendoza Ops](https://gdi-mendoza-ops-v21.streamlit.app)"
+            "No olvides calificar el outfit sugerido hoy para mejorar la IA."
         )
         bot.send_message(TELEGRAM_CHAT_ID, msg, parse_mode="Markdown")
     except Exception as e:
@@ -2005,7 +2064,7 @@ def tarea_lavanderia():
         print(f"Error lavanderia: {e}")
 
 # ==========================================
-# --- THREAD DE CONTROL BLINDADO (SINGLETON) ---
+# --- THREAD DE CONTROL BLINDADO (SINGLETON CON CACHÉ) ---
 # ==========================================
 def run_scheduler():
     schedule.every().day.at("10:00").do(tarea_manana) # 07:00 AM AR
@@ -2021,6 +2080,7 @@ def run_scheduler():
             print(f"⚠️ Error en scheduler: {e}")
             time.sleep(30)
 
+@st.cache_resource
 def iniciar_bot_singleton():
     if bot:
         hilos_activos = [t.name for t in threading.enumerate()]
@@ -2041,6 +2101,7 @@ def iniciar_bot_singleton():
             t_poll = threading.Thread(target=run_polling, name="Bot_Polling_GDI", daemon=True)
             t_poll.start()
             print("✅ Bot y Scheduler iniciados correctamente (Instancias Únicas).")
+    return True
 
 if __name__ == "__main__":
     iniciar_bot_singleton()
