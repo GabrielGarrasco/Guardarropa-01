@@ -1417,7 +1417,7 @@ with tab3:
         with col_m_in:
             manual_code = st.text_input("Código de Prenda")
         with col_m_act:
-            c_act1, c_act2, c_act3 = st.columns(3)
+            c_act1, c_act2, c_act3, c_act4 = st.columns(4)
             if manual_code:
                 clean_m_code = manual_code.strip()
                 if clean_m_code in df['Code'].values:
@@ -1436,6 +1436,15 @@ with tab3:
                         if st.button("🧺 Sucio"):
                             df.at[idx, 'Status'] = 'Sucio'
                             st.session_state['inventory'] = df; save_data_gsheet(df); st.toast("🧺 ¡Directo a lavar!"); st.rerun()
+                    with c_act4:
+                        if st.button("✨ Limpio"):
+                            df.at[idx, 'Status'] = 'Limpio'
+                            df.at[idx, 'Uses'] = 0
+                            df.at[idx, 'LaundryStart'] = ''
+                            st.session_state['inventory'] = df
+                            save_data_gsheet(df)
+                            st.toast("✨ ¡Rescatada del limbo y lista para usar!")
+                            st.rerun()        
                     
                     st.divider()
                     st.caption("Zona de Archivo (Desaparece del armario)")
