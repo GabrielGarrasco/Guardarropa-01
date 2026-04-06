@@ -795,7 +795,11 @@ def recommend_outfit(df, weather, occasion, seed):
                 else:
                     try:
                         lvl = int(sna['attr'])
-                        match = (t_min < 10 and lvl >= 3) or (t_min < 16 and lvl in [2, 3]) or (t_min < 22 and lvl == 1)
+                        # Nueva regla: priorizar según temperatura máxima para no cocinarse
+                        if t_max >= 25: match = (lvl == 1) # Si va a hacer calor a la tarde, solo rompevientos
+                        elif t_max >= 18: match = (lvl in [1, 2]) # Templado: livianas
+                        elif t_max >= 12: match = (lvl in [2, 3, 4]) # Fresco
+                        else: match = (lvl >= 3) # Helado todo el día: gruesas
                     except: match = False
             if match: cands.append(r)
         
@@ -957,6 +961,52 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["✨ Sugerencia", "🧺 Lava
 with tab1:
     today_str = get_mendoza_time().strftime("%Y-%m-%d")
     outfit_of_the_day = None
+    
+    # ------------------- ALERTA ROPA TÉRMICA -------------------
+    if weather['min'] <= 5:
+        st.error("❄️ **ALERTA POLAR:** La mínima de hoy bajó a 5°C o menos. Acordate de ponerte **ropa térmica** abajo de esto.")
+    
+    # ------------------- MÓDULO DE CARGA EXPRESS -------------------
+    with st.expander("⚡ Carga Express (Para cuando estás apurado)"):
+        with st.form("express_log"):
+            st.caption("Anotá los códigos de lo que agarraste del placard y andate.")
+            c_e1, c_e2, c_e3 = st.columns(3)
+            exp_top = c_e1.text_input("Top (Remera/Camisa)")
+            exp_bot = c_e2.text_input("Bottom (Pantalón)")
+            exp_out = c_e3.text_input("Outer (Campera)")
+            exp_sweat = st.checkbox("💦 Va todo a lavar (Transpiración)")
+            
+            if st.form_submit_button("🚀 Registrar y Salir"):
+                codes_to_log = [c.strip() for c in [exp_top, exp_bot, exp_out] if c.strip()]
+                if codes_to_log:
+                    df_mod = df.copy()
+                    for code in codes_to_log:
+                        if code in df_mod['Code'].values:
+                            idx = df_mod[df_mod['Code'] == code].index[0]
+                            if exp_sweat:
+                                df_mod.at[idx, 'Status'] = 'Sucio'
+                            else:
+                                curr = int(float(df_mod.at[idx, 'Uses'])) if df_mod.at[idx, 'Uses'] not in ['', 'nan'] else 0
+                                df_mod.at[idx, 'Uses'] = curr + 1
+                            df_mod.at[idx, 'LastWorn'] = datetime.now().strftime("%Y-%m-%d")
+                    
+                    st.session_state['inventory'] = df_mod
+                    save_data_gsheet(df_mod)
+                    
+                    entry = {
+                        'Date': get_mendoza_time().strftime("%Y-%m-%d %H:%M"), 
+                        'City': user_city, 'Temp_Real': weather['temp'], 'User_Adj_Temp': weather['temp'],
+                        'Occasion': code_occ, 'Top': exp_top, 'Bottom': exp_bot, 'Outer': exp_out,
+                        'Rating_Abrigo': 7, 'Rating_Comodidad': 4, 'Rating_Seguridad': 4, 'Action': 'Accepted',
+                        'Top_Abrigo': 7, 'Top_Comodidad': 4, 'Top_Flow': 4,
+                        'Bot_Abrigo': 7, 'Bot_Comodidad': 4, 'Bot_Flow': 4,
+                        'Out_Abrigo': 7, 'Out_Comodidad': 4, 'Out_Flow': 4
+                    }
+                    save_feedback_entry_gsheet(entry)
+                    st.success("✅ ¡Listo el pollo! Todo guardado, andá tranquilo.")
+                else:
+                    st.warning("Escribí al menos un código para guardar.")
+    # ---------------------------------------------------------------
     
     reserved_today_codes = st.session_state['agenda_reserves'].get(get_mendoza_time().date(), [])
     
