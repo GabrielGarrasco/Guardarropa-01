@@ -546,12 +546,12 @@ def enviar_foto_telegram(caption, image):
 def enviar_briefing_diario():
     try:
        if 'inventory' not in st.session_state: 
-    with st.spinner("Cargando sistema..."): 
-        data_cargada = load_data_gsheet()
-        if data_cargada is None or data_cargada.empty:
-            st.error("🚨 Error de conexión con la base de datos. Recargá la página (F5) para reintentar.")
-            st.stop() # Esto congela la app por completo acá mismo
-        st.session_state['inventory'] = data_cargada
+            with st.spinner("Cargando sistema..."): 
+                data_cargada = load_data_gsheet()
+            if data_cargada is None or data_cargada.empty:
+                st.error("🚨 Error de conexión con la base de datos. Recargá la página (F5) para reintentar.")
+                st.stop() # Esto congela la app por completo acá mismo
+            st.session_state['inventory'] = data_cargada
 
         w_data = get_weather_open_meteo()
         
