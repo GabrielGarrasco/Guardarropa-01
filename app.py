@@ -206,14 +206,14 @@ def _fetch_inventory():
             
         return df
     except: 
-        return None # <- El cambio más importante: si la conexión falla, devuelve None
+        return None # <- Si la conexión falla, devuelve None
 
 def load_data_gsheet():
     return _fetch_inventory()
 
 def _save_data_gsheet_direct(df):
     # --- CANDADO DE SEGURIDAD ---
-    if df.empty:
+    if df is None or df.empty:
         st.error("🚨 Seguridad: Intentaste guardar un inventario vacío. Acción bloqueada para no borrar la nube.")
         return
     # ----------------------------
@@ -545,13 +545,12 @@ def enviar_foto_telegram(caption, image):
 
 def enviar_briefing_diario():
     try:
-       if 'inventory' not in st.session_state: 
-            with st.spinner("Cargando sistema..."): 
-                data_cargada = load_data_gsheet()
-            if data_cargada is None or data_cargada.empty:
-                st.error("🚨 Error de conexión con la base de datos. Recargá la página (F5) para reintentar.")
-                st.stop() # Esto congela la app por completo acá mismo
-            st.session_state['inventory'] = data_cargada
+        if 'inventory' in st.session_state and not st.session_state['inventory'].empty:
+            df_inv = st.session_state['inventory']
+        else:
+            df_inv = load_data_gsheet()
+            
+        if df_inv is None or df_inv.empty: return False, "Error: No se pudo cargar el inventario."
 
         w_data = get_weather_open_meteo()
         
@@ -888,7 +887,12 @@ code_occ = user_occ[0]
 st.sidebar.markdown("---")
 st.sidebar.markdown("###### 🧢 Hoy llevas puesto:")
 if 'inventory' not in st.session_state: 
-    with st.spinner("Cargando sistema..."): st.session_state['inventory'] = load_data_gsheet()
+    with st.spinner("Cargando sistema..."): 
+        data_cargada = load_data_gsheet()
+        if data_cargada is None or data_cargada.empty:
+            st.error("🚨 Error de conexión con la base de datos. Recargá la página (F5) para reintentar.")
+            st.stop()
+        st.session_state['inventory'] = data_cargada
 df = st.session_state['inventory']
 
 try:
@@ -1941,7 +1945,7 @@ def enviar_sugerencia_interactiva(occ_code, chat_id, force_new_seed=False):
     if not bot: return
     try:
         df_inv = load_data_gsheet()
-        if df_inv.empty:
+        if df_inv is None or df_inv.empty:
             bot.send_message(chat_id, "⚠️ Error leyendo base de datos.")
             return
 
@@ -2036,7 +2040,7 @@ def tarea_lavanderia():
     if not bot: return
     try:
         df = load_data_gsheet()
-        if df.empty: return
+        if df is None or df.empty: return
 
         dirty_pool = df[df['Status'].isin(['Sucio', 'Lavando'])]
         if len(dirty_pool) < 4: 
