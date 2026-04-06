@@ -179,11 +179,11 @@ def get_google_sheet_client():
 @st.cache_data(ttl=600)
 def _fetch_inventory():
     client = get_google_sheet_client()
-    if not client: return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
+    if not client: return None # <- Si no hay cliente, devolvemos None
     try:
         sheet = client.open("GDI_Database").worksheet("inventory")
         data = sheet.get_all_records()
-        if not data: return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
+        if not data: return None # <- Si está vacío, devolvemos None
         
         df = pd.DataFrame(data).astype(str)
         
@@ -205,7 +205,8 @@ def _fetch_inventory():
             _save_data_gsheet_direct(df)
             
         return df
-    except: return pd.DataFrame(columns=['Code', 'Category', 'Season', 'Occasion', 'ImageURL', 'Status', 'LastWorn', 'Uses', 'LaundryStart'])
+    except: 
+        return None # <- El cambio más importante: si la conexión falla, devuelve None
 
 def load_data_gsheet():
     return _fetch_inventory()
@@ -544,12 +545,13 @@ def enviar_foto_telegram(caption, image):
 
 def enviar_briefing_diario():
     try:
-        if 'inventory' in st.session_state and not st.session_state['inventory'].empty:
-            df_inv = st.session_state['inventory']
-        else:
-            df_inv = load_data_gsheet()
-            
-        if df_inv.empty: return False, "Error: No se pudo cargar el inventario."
+        if 'inventory' not in st.session_state: 
+    with st.spinner("Cargando sistema..."): 
+        data_cargada = load_data_gsheet()
+        if data_cargada is None or data_cargada.empty:
+            st.error("🚨 Error de conexión con la base de datos. Recargá la página (F5) para reintentar.")
+            st.stop() # Esto congela la app por completo acá mismo
+        st.session_state['inventory'] = data_cargada
 
         w_data = get_weather_open_meteo()
         
