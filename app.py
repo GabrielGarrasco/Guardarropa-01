@@ -211,6 +211,12 @@ def load_data_gsheet():
     return _fetch_inventory()
 
 def _save_data_gsheet_direct(df):
+    # --- CANDADO DE SEGURIDAD ---
+    if df.empty:
+        st.error("🚨 Seguridad: Intentaste guardar un inventario vacío. Acción bloqueada para no borrar la nube.")
+        return
+    # ----------------------------
+
     client = get_google_sheet_client()
     if not client: 
         st.error("No se pudo conectar a Google Sheets.")
