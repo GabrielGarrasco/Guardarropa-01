@@ -545,7 +545,7 @@ def enviar_foto_telegram(caption, image):
 
 def enviar_briefing_diario():
     try:
-        if 'inventory' not in st.session_state: 
+       if 'inventory' not in st.session_state: 
     with st.spinner("Cargando sistema..."): 
         data_cargada = load_data_gsheet()
         if data_cargada is None or data_cargada.empty:
