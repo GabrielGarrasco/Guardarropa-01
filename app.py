@@ -772,8 +772,11 @@ def recommend_outfit(df, weather, occasion, seed, is_extra=False):
                       candidates_df['Color_Harmony'] = candidates_df.apply(lambda x: 15 if check_harmony(x['Code'], selected_partner_code) else -15, axis=1)
                 candidates_df['Final_Score'] = candidates_df['AI_Score'] + candidates_df['Color_Harmony'] + candidates_df.apply(lambda x: random.uniform(-1, 1), axis=1)
 
+            # ... (final de la sub-función get_best)
             return candidates_df.sort_values('Final_Score', ascending=False).iloc[0]
         except: return candidates_df.sample(1, random_state=seed).iloc[0]
+
+    final = [] # <--- ESTA ES LA LÍNEA QUE FALTABA
 
     bot_item = get_best(['Pantalón'], 'bot') 
     top = None
