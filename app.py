@@ -1040,12 +1040,26 @@ with tab1:
         st.divider()
 
         # ==========================================
+       # ==========================================
         # RECOMENDACIÓN EXTRA: PARA EL BOLSO
         # ==========================================
         if rutina_hoy and rutina_hoy['E_Ini']:
             st.markdown("### 🎒 Para el Bolso (Doble Turno)")
-            st.info(f"⚽ Detectado evento extra ({rutina_hoy['E_Occ']}) de {rutina_hoy['E_Ini']}:00 a {rutina_hoy['E_Fin']}:00 hs. Sugerencia:")
+            st.info(f"⚽ Detectado evento extra ({rutina_hoy['E_Occ']}) de {rutina_hoy['E_Ini']}:00 a {rutina_hoy['E_Fin']}:00 hs.")
+            
+            c_reuse1, c_reuse2 = st.columns(2)
+            reuse_bot = c_reuse1.checkbox("👖 Uso el mismo pantalón para ambos", value=False)
+            reuse_out = c_reuse2.checkbox("🧥 Uso el mismo abrigo para ambos", value=False)
+
+            # Evitar que sugiera empacar lo que ya tenés puesto
+            main_codes = [c for c in [rec_top, rec_bot, rec_out] if c != "N/A"]
+            if 'temp_blacklist' not in st.session_state: st.session_state['temp_blacklist'] = []
+            orig_bl = st.session_state['temp_blacklist'].copy()
+            st.session_state['temp_blacklist'].extend(main_codes)
+            
             recs_extra, _, coat_msg_ex, term_alert_ex = recommend_outfit(df, weather, rutina_hoy['E_Occ'], st.session_state['seed']+1, is_extra=True)
+            
+            st.session_state['temp_blacklist'] = orig_bl # Restaurar
             
             if not recs_extra.empty:
                 t_ex = recs_extra[recs_extra['Category'].isin(['Remera', 'Camisa'])]
@@ -1056,10 +1070,29 @@ with tab1:
                 rb_ex = b_ex.iloc[0]['Code'] if not b_ex.empty else "N/A"
                 ro_ex = o_ex.iloc[0]['Code'] if not o_ex.empty else "N/A"
                 
+                if reuse_bot: rb_ex = "Llevo el puesto"
+                if reuse_out: ro_ex = "Llevo el puesto"
+                
+                def mostrar_mini_img(code, col):
+                    if code not in ["N/A", "Llevo el puesto"]:
+                        row = df[df['Code'] == code]
+                        if not row.empty and row.iloc[0]['ImageURL']:
+                            img = cargar_imagen_desde_url(row.iloc[0]['ImageURL'])
+                            if img: col.image(img, use_container_width=True)
+                            else: col.caption("📷 Sin foto")
+                        else: col.caption("📷 Sin foto")
+                
                 c_ex1, c_ex2, c_ex3 = st.columns(3)
-                c_ex1.write(f"Top: `{rt_ex}`")
-                c_ex2.write(f"Bot: `{rb_ex}`")
-                c_ex3.write(f"Out: `{ro_ex}`")
+                
+                c_ex1.markdown(f"**Top:** `{rt_ex}`")
+                mostrar_mini_img(rt_ex, c_ex1)
+                
+                c_ex2.markdown(f"**Bot:** `{rb_ex}`")
+                if not reuse_bot: mostrar_mini_img(rb_ex, c_ex2)
+                
+                c_ex3.markdown(f"**Out:** `{ro_ex}`")
+                if not reuse_out: mostrar_mini_img(ro_ex, c_ex3)
+                
                 st.caption(coat_msg_ex)
             st.divider()
 
